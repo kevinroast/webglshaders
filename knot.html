@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html>
+   <head>
+<!--
+   Ray Marching demo by Kevin Roast
+   
+   - Lots of code/ideas for this demo come from reading:
+     http://www.iquilezles.org/www/material/nvscene2008/rwwtt.pdf
+     http://www.pouet.net/topic.php?which=7931&page=1
+     http://www.pouet.net/topic.php?which=7920&page=1
+     http://iquilezles.org/www/articles/distfunctions/distfunctions.htm
+     https://www.shadertoy.com/
+   
+   If you want to understand this stuff read through the PDF and pouet.net links above!
+-->
+      <script src="scripts/dat.gui.min.js"></script>
+      <script src="scripts/stats.min.js"></script>
+      <script id="vertex" type="x-shader">
+attribute vec2 aVertexPosition;
+
+void main()
+{
+   gl_Position = vec4(aVertexPosition, 0.0, 1.0);
+}
+      </script>
+      <script id="fragment" type="x-shader">
+#ifdef GL_ES
+precision highp float;
+#endif
+
+uniform float time;
+uniform vec2 resolution;
+uniform vec3 cameraPos;
+uniform vec3 cameraLookat;
+uniform vec3 lightDir;
+uniform vec3 lightColour;
+uniform float specular;
+uniform float specularHardness;
+uniform vec3 diffuse;
+uniform float ambientFactor;
+uniform bool ao;
+uniform bool shadows;
+uniform bool rotateWorld;
+uniform bool antialias;
+//Radius of the tubes
+uniform float tubeRadius;
+//Radius of the goup of tubes
+uniform float groupRadius;
+//Rotation Numerator X (integer): actually not a rotation. This is frequency in x direction
+uniform float rotNumeratorX;
+//Rotation Numerator Y (integer): actually not a rotation. This is frequency in y direction. (lissajou figure)
+uniform float rotNumeratorY;
+//Rotation Denominator (integer): this is the rotation "speed" in xz plane
+uniform float rotDenominator;
+//Rotations number: how many instances to check. related to the period of the knot.
+uniform int rotations;
+
+//Radius of the whole object (because it looks like a torus)
+const float objectRadius = 1.0;
+
+#define AO_SAMPLES 4
+#define RAY_DEPTH 256
+#define MAX_DEPTH 200.0
+#define SHADOW_RAY_DEPTH 24
+#define DISTANCE_MIN 0.001
+#define PI 3.14159265
+
+const vec2 delta = vec2(0.001, 0.);
+
+
+vec3 RotateY(vec3 p, float a)
+{
+   float c,s;
+   vec3 q=p;
+   c = cos(a);
+   s = sin(a);
+   p.x = c * q.x + s * q.z;
+   p.z = -s * q.x + c * q.z;
+   return p;
+}
+
+float twist(vec3 p)
+{
+   // seen from above it is a lissajou fugure
+   float ra  = p.z*rotNumeratorX/rotDenominator;
+   float raz = p.z*rotNumeratorY/rotDenominator;
+   return length(p.xy-vec2(groupRadius*cos(ra)+objectRadius,groupRadius*sin(raz)+objectRadius))-tubeRadius;
+}
+
+// Distance estimator for "trefoil knot" - see http://blog.hvidtfeldts.net/index.php/2012/01/knots-and-polyhedra/
+// and original formula from http://www.fractalforums.com/new-theories-and-research/not-fractal-but-funny-trefoil-knot-routine/
+float Dist(vec3 p)
+{
+   if (rotateWorld) p = RotateY(p, sin(time*0.05)*PI);
+   
+   float r=length(p.xz), ang=atan(p.z,p.x), y=p.y;
+   float d=1.0;
+   for (int i=0; i<10; i++)
+   {
+      vec3 p = vec3(r,y,ang+2.0*PI*float(i));
+      p.x -= objectRadius;
+      d = min(d, twist(p));
+      if (i == rotations) break;
+   }
+   return min(d, p.y+0.25);
+}
+
+// Based on original by IQ - optimized to remove a divide
+float CalcAO(vec3 p, vec3 n)
+{
+   float r = 0.0;
+   float w = 1.0;
+   for (int i=1; i<=AO_SAMPLES; i++)
+   {
+      float d0 = float(i) * 0.3;
+      r += w * (d0 - Dist(p + n * d0));
+      w *= 0.5;
+   }
+   return 1.0 - clamp(r,0.0,1.0);
+}
+
+// Based on original code by IQ
+float SoftShadow(vec3 ro, vec3 rd, float k)
+{
+   float res = 1.0;
+   float t = 0.5;          // min-t see http://www.iquilezles.org/www/articles/rmshadows/rmshadows.htm
+   for (int i=0; i<SHADOW_RAY_DEPTH; i++)
+   {
+      if (t < 10.0)  // max-t
+      {
+         float h = Dist(ro + rd * t);
+         res = min(res, k*h/t);
+         t += h;
+      }
+   }
+   return clamp(res, 0.0, 1.0);
+}
+
+vec3 GetNormal(vec3 pos)
+{
+   vec3 n;
+   n.x = Dist( pos + delta.xyy ) - Dist( pos - delta.xyy );
+   n.y = Dist( pos + delta.yxy ) - Dist( pos - delta.yxy );
+   n.z = Dist( pos + delta.yyx ) - Dist( pos - delta.yyx );
+   
+   return normalize(n);
+}
+
+// Based on a shading method by Ben Weston. Added AO and SoftShadows to original.
+vec4 Shading(vec3 pos, vec3 rd, vec3 norm)
+{
+   vec3 light = lightColour * max(0.0, dot(norm, lightDir));
+   vec3 heading = normalize(-rd + lightDir);
+   
+   // TODO: simple pos test on pos.y for floor - different colour and no spec for floor
+   float spec = pow(max(0.0, dot(heading, norm)), specularHardness);
+   
+   light = (diffuse * light) + (spec * specular * lightColour);
+   if (shadows) light *= SoftShadow(pos, lightDir, 16.0);
+   if (ao) light += CalcAO(pos, norm) * ambientFactor;
+   return vec4(light, 1.0);
+}
+
+// Original method by David Hoskins
+vec3 Sky(in vec3 rd)
+{
+   float sunAmount = max(dot(rd, lightDir), 0.0);
+   float v = pow(1.0 - max(rd.y,0.0),6.);
+   vec3 sky = mix(vec3(.1, .2, .3), vec3(.32, .32, .32), v);
+   sky += lightColour * sunAmount * sunAmount * .25 + lightColour * min(pow(sunAmount, 800.0)*1.5, .3);
+   
+   return clamp(sky, 0.0, 1.0);
+}
+
+// Camera function by TekF
+// Compute ray from camera parameters
+vec3 GetRay(vec3 dir, vec2 pos)
+{
+   pos = pos - 0.5;
+   pos.x *= resolution.x/resolution.y;
+   
+   dir = normalize(dir);
+   vec3 right = normalize(cross(vec3(0.,1.,0.),dir));
+   vec3 up = normalize(cross(dir,right));
+   
+   return dir + right*pos.x + up*pos.y;
+}
+
+vec4 March(vec3 ro, vec3 rd)
+{
+   float t = 0.0;
+   float d = 1.0;
+   for (int i=0; i<RAY_DEPTH; i++)
+   {
+      vec3 p = ro + rd * t;
+      d = Dist(p);
+      if (abs(d) < DISTANCE_MIN)
+      {
+         return vec4(p, 1.0);
+      }
+      t += d;
+      if (t >= MAX_DEPTH) break;
+   }
+   return vec4(0.0);
+}
+
+void main()
+{
+   const int ANTIALIAS_SAMPLES = 4;
+   
+   vec4 res = vec4(0.0);
+   
+   if (antialias)
+   {
+      float d_ang = 2.*PI / float(ANTIALIAS_SAMPLES);
+      float ang = d_ang * 0.33333;
+      float r = 0.3;
+      for (int i = 0; i < ANTIALIAS_SAMPLES; i++)
+      {
+         vec2 p = vec2((gl_FragCoord.x + cos(ang)*r) / resolution.x, (gl_FragCoord.y + sin(ang)*r) / resolution.y);
+         vec3 ro = cameraPos;
+         vec3 rd = normalize(GetRay(cameraLookat-cameraPos, p));
+         vec4 _res = March(ro, rd);
+         if (_res.a == 1.0) res.xyz += clamp(Shading(_res.xyz, rd, GetNormal(_res.xyz)).xyz, 0.0, 1.0);
+         else res.xyz += Sky(rd);
+         ang += d_ang;
+      }
+      res /= float(ANTIALIAS_SAMPLES);
+   }
+   else
+   {
+      vec2 p = gl_FragCoord.xy / resolution.xy;
+      vec3 ro = cameraPos;
+      vec3 rd = normalize(GetRay(cameraLookat-cameraPos, p));
+      res = March(ro, rd);
+      if (res.a == 1.0) res.xyz = clamp(Shading(res.xyz, rd, GetNormal(res.xyz)).xyz, 0.0, 1.0);
+      else res.xyz = Sky(rd);
+   }
+   
+   gl_FragColor = vec4(res.xyz, 1.0);
+}
+      </script>
+      
+      <script type="text/javascript">
+var requestAnimationFrame = window.requestAnimationFrame || window.webkitRequestAnimationFrame ||
+                            window.mozRequestAnimationFrame || window.msRequestAnimationFrame || 
+                            function(c) {window.setTimeout(c, 15)};
+var config = {
+   camera: {
+      x: 1.0, y: 6.0, z: -5.0
+   },
+   lookat: {
+      x: 0.0, y: 0.0, z: 0.0
+   },
+   lightDir: {
+      x: -5.0, y: 4.5, z: -2.0
+   },
+   lightColour: {
+      r: 2.0, g: 2.3, b: 1.5
+   },
+   surface: {
+      specular: 64.0,
+      specularHardness: 512.0,
+      diffuse: 0.22,
+      ambientFactor: 0.65
+   },
+   global: {
+      ao: true,
+      shadows: true,
+      rotateWorld: true,
+      antialias: false
+   },
+   knot: {
+      tubeRadius: 0.12,
+      groupRadius: 0.9,
+      rotNumeratorX: 5,
+      rotNumeratorY: -5,
+      rotDenominator: 8,
+      rotations: 8
+   }
+};
+
+function init()
+{
+   var pause = false;
+   document.addEventListener('keydown', function(e) {
+      switch (e.keyCode)
+      {
+         case 27: // ESC
+            pause = !pause;
+            break;
+      }
+   }, false);
+
+   // add GUI controls
+   var mobile = (navigator.userAgent.indexOf("Android") !== -1);
+   var gui = new dat.GUI();
+   var panel = gui.addFolder('Camera Position');
+   panel.add(config.camera, "x").min(-16.0).max(16.0).step(0.1);
+   panel.add(config.camera, "y").min(-16.0).max(16.0).step(0.1);
+   panel.add(config.camera, "z").min(-64.0).max(64.0).step(0.1);
+   if (!mobile) panel.open();
+   panel = gui.addFolder('Camera LookAt');
+   panel.add(config.lookat, "x").min(-16.0).max(16.0).step(0.1);
+   panel.add(config.lookat, "y").min(-16.0).max(16.0).step(0.1);
+   panel.add(config.lookat, "z").min(-16.0).max(16.0).step(0.1);
+   panel = gui.addFolder('Light Direction');
+   panel.add(config.lightDir, "x").min(-16.0).max(16.0).step(0.1);
+   panel.add(config.lightDir, "y").min(-16.0).max(16.0).step(0.1);
+   panel.add(config.lightDir, "z").min(-16.0).max(16.0).step(0.1);
+   panel = gui.addFolder('Light Colour');
+   panel.add(config.lightColour, "r").min(0.0).max(3.0).step(0.1);
+   panel.add(config.lightColour, "g").min(0.0).max(3.0).step(0.1);
+   panel.add(config.lightColour, "b").min(0.0).max(3.0).step(0.1);
+   panel = gui.addFolder('Surface');
+   panel.add(config.surface, "specular").min(0).max(64);
+   panel.add(config.surface, "specularHardness").min(16).max(1024).step(16);
+   panel.add(config.surface, "diffuse").min(0).max(1).step(0.05);
+   panel.add(config.surface, "ambientFactor").min(0).max(1).step(0.05);
+   panel = gui.addFolder('Global');
+   panel.add(config.global, "antialias").name("Anti Alias");
+   panel.add(config.global, "shadows").name("Shadows");
+   panel.add(config.global, "ao").name("Ambient Occlusion");
+   panel.add(config.global, "rotateWorld").name("Rotate World");
+   if (!mobile) panel.open();
+   panel = gui.addFolder('Knot');
+   panel.add(config.knot, "tubeRadius").min(0.01).max(1.0).step(0.01);
+   panel.add(config.knot, "groupRadius").min(0.01).max(2.0).step(0.01);
+   panel.add(config.knot, "rotNumeratorX").min(-10).max(10).step(1);
+   panel.add(config.knot, "rotNumeratorY").min(-10).max(10).step(1);
+   panel.add(config.knot, "rotDenominator").min(1).max(20).step(1);
+   panel.add(config.knot, "rotations").min(1).max(10).step(1);
+   if (!mobile) panel.open();
+   
+   var stats = new Stats();
+   document.body.appendChild(stats.domElement);
+   
+   // create webgl context on the canvas element
+   var canvas = document.getElementById("canvas"),
+       aspect = canvas.width / canvas.height;
+   try
+   {
+      var gl = canvas.getContext("experimental-webgl");
+   }
+   catch (e)
+   {
+      document.write("Whoops! No useful WEB-GL impl available. Shame on you and your browser vendor.<br>" + e.message);
+      return;
+   }
+   gl.viewport(0, 0, canvas.width, canvas.height);
+   gl.clearColor(0, 0, 0, 1);
+   gl.clear(gl.COLOR_BUFFER_BIT);
+   
+   // get the vertex and fragment shader source
+   var v = document.getElementById("vertex").firstChild.nodeValue;
+   var f = document.getElementById("fragment").firstChild.nodeValue;
+   
+   // compile and link the shaders
+   var vs = gl.createShader(gl.VERTEX_SHADER);
+   gl.shaderSource(vs, v);
+   gl.compileShader(vs);
+   
+   var fs = gl.createShader(gl.FRAGMENT_SHADER);
+   gl.shaderSource(fs, f);
+   gl.compileShader(fs);
+   
+   var program = gl.createProgram();
+   gl.attachShader(program, vs);
+   gl.attachShader(program, fs);
+   gl.linkProgram(program);
+   
+   // debug shader compile status
+   var error = false;
+   if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS))
+   {
+      error = true;
+      console.log(gl.getShaderInfoLog(vs));
+   }
+   
+   if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS))
+   {
+      error = true;
+      console.log(gl.getShaderInfoLog(fs));
+   }
+   
+   if (!gl.getProgramParameter(program, gl.LINK_STATUS))
+   {
+      error = true;
+      console.log(gl.getProgramInfoLog(program));
+   }
+   if (error) return;
+   
+   var firstTime = Date.now();
+   (f = function() {
+      if (!pause)
+      {
+         stats.begin();
+         
+         // create vertices to fill the canvas with a single quad 
+         var vertices = new Float32Array(
+            [
+               -1, 1*aspect, 1, 1*aspect, 1, -1*aspect,
+               -1, 1*aspect, 1, -1*aspect, -1, -1*aspect
+            ]);
+         
+         var vbuffer = gl.createBuffer();
+         gl.bindBuffer(gl.ARRAY_BUFFER, vbuffer);
+         gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+         
+         var triCount = 2,
+             numItems = vertices.length / triCount;
+         
+         gl.useProgram(program);
+         
+         var time = (Date.now() - firstTime) / 1000.0;
+         program.time = gl.getUniformLocation(program, "time");
+         gl.uniform1f(program.time, time);
+         
+         program.resolution = gl.getUniformLocation(program, "resolution");
+         gl.uniform2f(program.resolution, canvas.width, canvas.height);
+         
+         program.cameraPos = gl.getUniformLocation(program, "cameraPos");
+         gl.uniform3f(program.cameraPos, config.camera.x, config.camera.y, config.camera.z);
+         
+         program.cameraLookat = gl.getUniformLocation(program, "cameraLookat");
+         gl.uniform3f(program.cameraLookat, config.lookat.x, config.lookat.y, config.lookat.z);
+         
+         program.lightDir = gl.getUniformLocation(program, "lightDir");
+         // pre normalise light dir
+         var x = config.lightDir.x, y = config.lightDir.y, z = config.lightDir.z;
+         var len = x*x + y*y + z*z;
+         len = 1.0 / Math.sqrt(len);
+         gl.uniform3f(program.lightDir, config.lightDir.x*len, config.lightDir.y*len, config.lightDir.z*len);
+         
+         program.lightColour = gl.getUniformLocation(program, "lightColour");
+         gl.uniform3f(program.lightColour, config.lightColour.r, config.lightColour.g, config.lightColour.b);
+         
+         program.specular = gl.getUniformLocation(program, "specular");
+         gl.uniform1f(program.specular, config.surface.specular);
+         
+         program.specularHardness = gl.getUniformLocation(program, "specularHardness");
+         gl.uniform1f(program.specularHardness, config.surface.specularHardness);
+         
+         program.diffuse = gl.getUniformLocation(program, "diffuse");
+         gl.uniform3f(program.diffuse, config.surface.diffuse,config.surface.diffuse,config.surface.diffuse);
+         
+         program.ambientFactor = gl.getUniformLocation(program, "ambientFactor");
+         gl.uniform1f(program.ambientFactor, config.surface.ambientFactor);
+         
+         program.rotateWorld = gl.getUniformLocation(program, "rotateWorld");
+         gl.uniform1f(program.rotateWorld, config.global.rotateWorld);
+         
+         program.ao = gl.getUniformLocation(program, "ao");
+         gl.uniform1f(program.ao, config.global.ao);
+         
+         program.shadows = gl.getUniformLocation(program, "shadows");
+         gl.uniform1f(program.shadows, config.global.shadows);
+         
+         program.antialias = gl.getUniformLocation(program, "antialias");
+         gl.uniform1f(program.antialias, config.global.antialias);
+         
+         program.tubeRadius = gl.getUniformLocation(program, "tubeRadius");
+         gl.uniform1f(program.tubeRadius, config.knot.tubeRadius);
+         
+         program.groupRadius = gl.getUniformLocation(program, "groupRadius");
+         gl.uniform1f(program.groupRadius, config.knot.groupRadius);
+         
+         program.rotNumeratorX = gl.getUniformLocation(program, "rotNumeratorX");
+         gl.uniform1f(program.rotNumeratorX, config.knot.rotNumeratorX);
+         
+         program.rotNumeratorY = gl.getUniformLocation(program, "rotNumeratorY");
+         gl.uniform1f(program.rotNumeratorY, config.knot.rotNumeratorY);
+         
+         program.rotDenominator = gl.getUniformLocation(program, "rotDenominator");
+         gl.uniform1f(program.rotDenominator, config.knot.rotDenominator);
+         
+         program.rotations = gl.getUniformLocation(program, "rotations");
+         gl.uniform1i(program.rotations, config.knot.rotations);
+         
+         program.aVertexPosition = gl.getAttribLocation(program, "aVertexPosition");
+         gl.enableVertexAttribArray(program.aVertexPosition);
+         gl.vertexAttribPointer(program.aVertexPosition, triCount, gl.FLOAT, false, 0, 0);
+         
+         gl.drawArrays(gl.TRIANGLES, 0, numItems);
+         
+         stats.end();
+         //pause = true;
+      }
+      requestAnimationFrame(f);
+   })();
+}
+      </script>
+   </head>
+   <body onload="init()">
+      <canvas id="canvas" width="768" height="512">
+   </body>
+</html>
