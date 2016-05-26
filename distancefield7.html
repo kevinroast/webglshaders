@@ -87,6 +87,19 @@ float Noise(in vec3 x)
                    mix( Hash(n+270.0), Hash(n+271.0),f.x),f.y),f.z);
 }
 
+float FractalNoise(in vec2 xy)
+{
+   float w = 0.7;
+   float f = 0.0;
+   for (int i = 0; i < 3; i++)
+   {
+      f += Noise(xy) * w;
+      w *= 0.5;
+      xy *= 2.333;
+   }
+   return f;
+}
+
 float HexPrism(vec3 p, vec2 h)
 {
    vec3 q = abs(p);
@@ -114,8 +127,8 @@ float Dist(vec3 pos)
             ),
             min(
                HexPrism(q2, vec2(1.0,0.5)),
-               HexPrism(q2-vec3(0.,1.0,0.), vec2(0.7,5.))
-            )
+               HexPrism(q2-vec3(0.,1.0,0.), vec2(clamp(pos.y*0.2,0.0,1.0),5.))   // pos.y*(FractalNoise(pos.xz*2.0)*1.0/2.0)
+            ) //+ FractalNoise(pos.xz*8.0)*0.25/8.0 // Noise(p*NoiseSize)*NoiseRoughness/NoiseSize
          )
       );
 }
@@ -179,20 +192,16 @@ vec4 Shading(vec3 pos, vec3 rd, vec3 norm)
    vec3 heading = normalize(-rd + lightDir);
    light = (diffuse * light);
    if (shadows) light *= SoftShadow(pos, lightDir, 16.0);
-   if (sss) light = mix(light, sssColour, CalcSSS(pos, rd));
+   // modify and invert the SSS for a cool effect up high in the towers
+   float scat = CalcSSS(pos, rd) * -(pos.y);
+   vec3 sc = sssColour;
+   // now enhance with the red component of the SSS to make the centre of the towers glow red
+   sc.r += scat * (FractalNoise(pos.zx*16.0+cos(time))*pos.y*(sin(time)+2.0))-0.75;
+   sc.g += scat * 2.0;
+   sc.b += scat;
+   if (sss) light = mix(light, sc, scat);
    if (ao) light += CalcAO(pos, norm) * ambientFactor;
    return vec4(light, 1.0);
-}
-
-// Original method by David Hoskins
-vec3 Sky(in vec3 rd)
-{
-   float sunAmount = max(dot(rd, lightDir), 0.0);
-   float v = pow(1.0 - max(rd.y,0.0),6.);
-   vec3 sky = mix(vec3(.1, .2, .3), vec3(.32, .32, .32), v);
-   sky += lightColour * sunAmount * sunAmount * .25 + lightColour * min(pow(sunAmount, 800.0)*1.5, .3);
-   
-   return clamp(sky, 0.0, 1.0);
 }
 
 // Original method by David Hoskins
@@ -218,6 +227,12 @@ vec3 GetRay(vec3 dir, vec2 pos)
    return dir + right*pos.x + up*pos.y;
 }
 
+// TODO: reflections! see http://js1k.com/2014-dragons/details/1868
+// - how is that demo SO fast??! all in a single main loop method - what other tricks - v.simple distance field
+// for reflections - embed the March method in a main loop with ref 0-1 loop
+// ray_depth lower - and /2 for reflections
+// no spec or fog on reflection shading ie. it is only calculated once in the loop
+// no sky, black bg, generally does not fill the screen - clever...
 vec4 March(vec3 ro, vec3 rd)
 {
    float t = 0.0;
@@ -265,7 +280,7 @@ void main()
          vec3 rd = normalize(GetRay(cameraLookat-cp, p));
          vec4 _res = March(ro, rd);
          if (_res.a == 1.0) res.xyz += clamp(Shading(_res.xyz, rd, GetNormal(_res.xyz)).xyz, 0.0, 1.0);
-         else res.xyz += Sky(rd);
+         else res.xyz += lightColour;
          ang += d_ang;
       }
       res.xyz /= float(ANTIALIAS_SAMPLES);
@@ -289,7 +304,7 @@ void main()
          rd = normalize(GetRay(cameraLookat-cp, p));
          _res = March(ro, rd);
          if (_res.a == 1.0) res.xyz += clamp(Shading(_res.xyz, rd, GetNormal(_res.xyz)).xyz, 0.0, 1.0);
-         else res.xyz += Sky(rd);
+         else res.xyz += lightColour;
          ang += d_ang;
       }
       res.xyz /= float(DOF_SAMPLES);
@@ -302,7 +317,7 @@ void main()
       vec3 rd = normalize(GetRay(cameraLookat-cp, p));
       res = March(ro, rd);
       if (res.a == 1.0) res.xyz = clamp(Shading(res.xyz, rd, GetNormal(res.xyz)).xyz, 0.0, 1.0);
-      else res.xyz = Sky(rd);
+      else res.xyz = lightColour;
       if (postEffects) res.xyz = PostEffects(res.xyz, p);
    }
    
@@ -322,16 +337,16 @@ var config = {
       x: 0.0, y: 0.5, z: 1.0 
    },
    lightDir: {
-      x: 10.0, y: 6.0, z: 2.0
+      x: 10.0, y: 3.5, z: 20.0
    },
    lightColour: {
-      r: 0.0, g: 0.9, b: 2.4
+      r: 1.0, g: 0.7, b: 0.7
    },
    sssColour: {
-      r: 2.3, g: 2.0, b: 1.0
+      r: 1.2, g: 1.4, b: 1.0
    },
    surface: {
-      diffuse: 0.25,
+      diffuse: 0.3,
       ambientFactor: 0.25
    },
    global: {

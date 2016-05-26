@@ -46,9 +46,8 @@ uniform bool antialias;
 #define PI 3.14159265
 #define AO_SAMPLES 5
 #define RAY_DEPTH 256
-#define MAX_DEPTH 100.0
-#define SHADOW_RAY_DEPTH 24
-#define DISTANCE_MIN 0.005
+#define MAX_DEPTH 20.0
+#define DISTANCE_MIN 0.003
 #define PI 3.14159265
 
 #define FLOOR_YPOS -2.0
@@ -132,11 +131,26 @@ float CalcAO(vec3 p, vec3 n)
 }
 
 // Based on original code by IQ
-float SoftShadow(vec3 ro, vec3 rd, float k)
+float SelfShadow(vec3 ro, vec3 rd)
 {
+   float k = 32.0;
    float res = 1.0;
    float t = 0.1;          // min-t see http://www.iquilezles.org/www/articles/rmshadows/rmshadows.htm
-   for (int i=0; i<SHADOW_RAY_DEPTH; i++)
+   for (int i=0; i<16; i++)
+   {
+      float h = Dist(ro + rd * t);
+      res = min(res, k*h/t);
+      t += h;
+      if (t > 4.0) break; // max-t
+   }
+   return clamp(res, 0.0, 1.0);
+}
+float SoftShadow(vec3 ro, vec3 rd)
+{
+   float k = 16.0;
+   float res = 1.0;
+   float t = 0.1;          // min-t see http://www.iquilezles.org/www/articles/rmshadows/rmshadows.htm
+   for (int i=0; i<48; i++)
    {
       float h = Dist(ro + rd * t);
       res = min(res, k*h/t);
@@ -145,6 +159,7 @@ float SoftShadow(vec3 ro, vec3 rd, float k)
    }
    return clamp(res, 0.0, 1.0);
 }
+
 
 vec3 GetNormal(vec3 pos)
 {
@@ -164,6 +179,7 @@ vec3 GetNormal(vec3 pos)
 }
 
 // Based on a shading method by Ben Weston. Added AO and SoftShadows to original.
+const vec3 sssColour = vec3(0.5,0.5,1.0);
 vec4 Shading(vec3 pos, vec3 rd, vec3 norm)
 {
    vec3 light;
@@ -175,13 +191,13 @@ vec4 Shading(vec3 pos, vec3 rd, vec3 norm)
       vec3 heading = normalize(-rd + lightDir);
       float spec = pow(max(0.0, dot(heading, norm)), specularHardness);
       light = (diffuse * light) + (spec * specular * lightColour);
-      if (shadows) light *= SoftShadow(pos, lightDir, 32.0);   // harder edged shadows on object
+      if (shadows) light *= SelfShadow(pos, lightDir);   // harder edged shadows on object
       if (ao) light += CalcAO(pos, norm) * ambientFactor;
    }
    else
    {
       light = vec3(0.1,0.66,0.2) * max(0.0, dot(norm, lightDir));
-      if (shadows) light *= SoftShadow(pos, lightDir, 12.0);   // softer edged shadows on floor
+      if (shadows) light *= SoftShadow(pos, lightDir);   // softer edged shadows on floor
       if (ao) light += CalcAO(pos, norm) * max(ambientFactor-0.25, 0.0);
    }
    
@@ -216,11 +232,10 @@ vec3 GetRay(vec3 dir, vec2 pos)
 vec4 March(vec3 ro, vec3 rd)
 {
    float t = 0.0;
-   float d = 1.0;
    for (int i=0; i<RAY_DEPTH; i++)
    {
       vec3 p = ro + rd * t;
-      d = Dist(p);
+      float d = Dist(p);
       if (abs(d) < DISTANCE_MIN)
       {
          return vec4(p, 1.0);
