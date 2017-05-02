@@ -46,7 +46,7 @@ uniform bool antialias;
 #define AO_SAMPLES 5
 #define RAY_DEPTH 256
 #define MAX_DEPTH 200.0
-#define SHADOW_RAY_DEPTH 16
+#define SHADOW_RAY_DEPTH 32
 #define DISTANCE_MIN 0.001
 #define PI 3.14159265
 
@@ -278,9 +278,11 @@ var config = {
    }
 };
 
+var pause = false;
+var stats = new Stats();
+var aspect, gl;
 function init()
 {
-   var pause = false;
    document.addEventListener('keydown', function(e) {
       switch (e.keyCode)
       {
@@ -326,15 +328,14 @@ function init()
    panel.add(config.global, "rotateWorld").name("Rotate World");
    if (!mobile) panel.open();
    
-   var stats = new Stats();
    document.body.appendChild(stats.domElement);
    
    // create webgl context on the canvas element
-   var canvas = document.getElementById("canvas"),
-       aspect = canvas.width / canvas.height;
+   var canvas = document.getElementById("canvas");
+   aspect = canvas.width / canvas.height;
    try
    {
-      var gl = canvas.getContext("experimental-webgl");
+      gl = canvas.getContext("experimental-webgl");
    }
    catch (e)
    {
@@ -460,14 +461,20 @@ function init()
          gl.drawArrays(gl.TRIANGLES, 0, numItems);
          
          stats.end();
-         //pause = true;
       }
       requestAnimationFrame(f);
    })();
 }
       </script>
+      <script src="scripts/utils.js"></script>
+      <link rel="stylesheet" href="../../reset.css">
+      <link rel="stylesheet" href="./page.css">
+      <link href='http://fonts.googleapis.com/css?family=Open+Sans:400,300,600' rel='stylesheet' type='text/css'>
    </head>
    <body onload="init()">
-      <canvas id="canvas" width="720" height="600">
+      <canvas id="canvas" width="720" height="600"></canvas>
+      <a href="#" id="fullscreen">Toggle Full Screen</a>
+      <a href="." id="back">Show me more awesome demos!</a>
+   </body>
    </body>
 </html>

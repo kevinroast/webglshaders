@@ -42,34 +42,17 @@ uniform bool ao;
 uniform bool shadows;
 uniform bool rotateWorld;
 uniform bool antialias;
-uniform bool dof;
 
-uniform int Iterations;
-uniform float Scale;
-uniform float Size;
-uniform vec3 plnormal;
-uniform vec3 Offset;
-uniform float Angle1;
-uniform vec3 Rot1;
-uniform float Angle2;
-uniform vec3 Rot2;
-
-#define Phi (.5*(1.+sqrt(5.)))
-
-vec3 n1 = normalize(vec3(-Phi,Phi-1.0,1.0));
-vec3 n2 = normalize(vec3(1.0,-Phi,Phi+1.0));
-vec3 n3 = normalize(vec3(0.0,0.0,-1.0));
-mat4 M;
-
-#define BAILOUT 1000.0
-#define AO_SAMPLES 4
-#define RAY_DEPTH 128
-#define MAX_DEPTH 100.0
-#define SHADOW_RAY_DEPTH 32
+#define PI 3.14159265
+#define AO_SAMPLES 5
+#define RAY_DEPTH 512
+#define MAX_DEPTH 256.0
 #define DISTANCE_MIN 0.001
 #define PI 3.14159265
 
-const vec2 delta = vec2(DISTANCE_MIN/10.0, 0.);
+#define FLOOR_YPOS -0.35
+
+const vec2 delta = vec2(DISTANCE_MIN, 0.);
 
 
 vec3 RotateY(vec3 p, float a)
@@ -83,34 +66,44 @@ vec3 RotateY(vec3 p, float a)
    return p;
 }
 
-// Icosahedral polyhedra Distance Estimator (Knighty 2011 some of the code is from Syntopia)
-// Original DE can be found here: https://github.com/Syntopia/Fragmentarium/blob/master/Fragmentarium-Source/Examples/Knighty%20Collection/Icosahedral_polyhedra_iterated_20.frag
-float Dist(vec3 z)
+float Plane(vec3 p, vec3 n)
 {
-   if (rotateWorld) z = RotateY(z, sin(time*0.05)*PI);
+   return dot(p, n);
+}
+
+/*vec3 ReplicateXZ(vec3 p, vec3 c)
+{
+   return vec3(mod(p.x, c.x) - 0.5 * c.x, p.y, mod(p.z, c.z) - 0.5 * c.z);
+}
+float Spheres(vec3 p, vec3 c)
+{
+   vec3 q1 = ReplicateXZ(p, vec3(4.0, 0.0, 2.0));
+   vec3 q2 = ReplicateXZ(p + vec3(2.0, 0.0, 1.5), vec3(4.0, 0.0, 2.0));
    
-   float dmin=10000.;
-   float s=1.;
-   for (int i=0; i<8; i++) {
-      float t;
-      // Folds. Dodecahedral
-      z = abs(z);
-      t=dot(z,n1); if (t>0.0) { z-=2.0*t*n1; }
-      t=dot(z,n2); if (t>0.0) { z-=2.0*t*n2; }
-      z = abs(z);
-      t=dot(z,n1); if (t>0.0) { z-=2.0*t*n1; }
-      t=dot(z,n2); if (t>0.0) { z-=2.0*t*n2; }
-      z = abs(z);
-      
-      // Rotate, scale, rotate (we need to cast to a 4-component vector).
-      z = (M*vec4(z,1.0)).xyz;
-      s /= Scale;
-      
-      if (i == Iterations) break;
-      if (dot(z,z) > BAILOUT) break;
-   }
-   //Distance to the plane going through vec3(Size,0.,0.) and which normal is plnormal
-   return abs(s*dot(z-vec3(Size,0.,0.), plnormal));
+   return
+      min(
+         length(q1-vec3(0.0,0.5,0.0))-0.75,
+         length(q2-vec3(0.0,0.0,0.0))-0.35
+      );
+}*/
+
+float Spheres(vec3 p, vec3 c)
+{
+   vec3 q = vec3(mod(p.x, c.x) - 0.5 * c.x, p.y, mod(p.z, c.z) - 0.5 * c.z);
+   
+   return length(q-vec3(0.0,0.5,0.0))-0.85;
+}
+
+// This should return continuous positive values when outside and negative values inside,
+// which roughly indicate the distance of the nearest surface.
+float Dist(vec3 pos)
+{
+   if (rotateWorld) pos = RotateY(pos, sin(time*0.25)*PI);
+   
+   return min(
+      Plane(pos-vec3(0.,FLOOR_YPOS,0.), vec3(0.,1.,0.)),
+      Spheres(pos, vec3(3.,0.,3.))
+   );
 }
 
 // Based on original by IQ - optimized to remove a divide
@@ -124,47 +117,69 @@ float CalcAO(vec3 p, vec3 n)
       r += w * (d0 - Dist(p + n * d0));
       w *= 0.5;
    }
-   return 1.0 - clamp(r, 0.0, 1.0);
+   return 1.0 - r;
 }
 
-// Based on original code by IQ
-float SoftShadow(vec3 ro, vec3 rd, float k)
+float SoftShadow(vec3 ro, vec3 rd)
 {
+   float k = 16.0;          // softness
    float res = 1.0;
-   float t = 0.1;          // min-t see http://www.iquilezles.org/www/articles/rmshadows/rmshadows.htm
-   for (int i=0; i<SHADOW_RAY_DEPTH; i++)
+   float t = 1.0;          // min-t see http://www.iquilezles.org/www/articles/rmshadows/rmshadows.htm
+   for (int i=0; i<16; i++)
    {
       float h = Dist(ro + rd * t);
       res = min(res, k*h/t);
       t += h;
-      if (t > 10.0) break; // max-t
+      if (t > 8.0) break; // max-t
    }
-   return res;
+   return clamp(res, 0.0, 1.0);
 }
 
 vec3 GetNormal(vec3 pos, float s)
 {
-   vec3 n;
-   // optimized normal calculation - based on final distance to surface see 704 demo
-   n.x = s - Dist(pos - delta.xyy);
-   n.y = s - Dist(pos - delta.yxy);
-   n.z = s - Dist(pos - delta.yyx);
-   return normalize(n);
+   if (pos.y < FLOOR_YPOS + DISTANCE_MIN)
+   {
+      return vec3(0.0,1.0,0.0);
+   }
+   else
+   {
+      vec3 n;
+      n.x = s - Dist(pos - delta.xyy);
+      n.y = s - Dist(pos - delta.yxy);
+      n.z = s - Dist(pos - delta.yyx);
+      
+      return normalize(n);
+   }
 }
 
 // Based on a shading method by Ben Weston. Added AO and SoftShadows to original.
 vec4 Shading(vec3 pos, vec3 rd, vec3 norm)
 {
-   vec3 light = lightColour * max(0.0, dot(norm, lightDir));
-   vec3 heading = normalize(-rd + lightDir);
+   vec3 light;
+   float ref;
    
-   float spec = pow(max(0.0, dot(heading, norm)), specularHardness);
-   float shadow = 1.0;
-   if (shadows) shadow *= SoftShadow(pos, lightDir, 64.0);
-   light = (diffuse * light * shadow) + (spec * specular * lightColour * shadow);
-   if (ao) light += CalcAO(pos, norm) * ambientFactor;
-
-   return vec4(light, 1.0);
+   // simple pos test on pos.y for floor (see Dist() above) - different colour and no spec for floor
+   if (pos.y > FLOOR_YPOS+DISTANCE_MIN)
+   {
+      light = lightColour * max(0.0, dot(norm, lightDir));
+      vec3 heading = normalize(-rd + lightDir);
+      float spec = pow(max(0.0, dot(heading, norm)), specularHardness);
+      light = (diffuse * light) + (spec * specular);
+      //if (shadows) light *= SoftShadow(pos, lightDir);
+      if (ao) light += CalcAO(pos, norm) * ambientFactor;
+      // sphere reflection
+      ref = 0.5;
+   }
+   else
+   {
+      light = vec3(0.1,0.66,0.2) * max(0.0, dot(norm, lightDir));
+      if (shadows) light *= SoftShadow(pos, lightDir);
+      if (ao) light += CalcAO(pos, norm) * ambientFactor;
+      // floor reflection level
+      ref = 0.2;
+   }
+   
+   return vec4(light, ref);
 }
 
 // Original method by David Hoskins
@@ -174,12 +189,11 @@ vec3 Sky(in vec3 rd)
    float v = pow(1.0 - max(rd.y,0.0),6.);
    vec3 sky = mix(vec3(.1, .2, .3), vec3(.32, .32, .32), v);
    sky += lightColour * sunAmount * sunAmount * .25 + lightColour * min(pow(sunAmount, 800.0)*1.5, .3);
-   
-   return clamp(sky, 0.0, 1.0);
+   return sky;
 }
 
 // Camera function by TekF
-// Compute ray from camera parameters
+// Compute ray fro8m camera parameters
 vec3 GetRay(vec3 dir, vec2 pos)
 {
    pos = pos - 0.5;
@@ -192,130 +206,121 @@ vec3 GetRay(vec3 dir, vec2 pos)
    return dir + right*pos.x + up*pos.y;
 }
 
-vec4 March(vec3 ro, vec3 rd)
+// March - note the inout!
+vec4 March(inout vec3 ro, inout vec3 rd)
 {
    float t = 0.0;
-   float d = 0.0;
+   float d = 1.0;
    for (int i=0; i<RAY_DEPTH; i++)
    {
       vec3 p = ro + rd * t;
       d = Dist(p);
       if (d < DISTANCE_MIN)
       {
-         return vec4(p, d);
+         vec3 norm = GetNormal(p, d);
+         vec4 res = Shading(p, rd, norm);
+         res.rgb *= (1.0 - res.a);
+         
+         // ray reflection - shift out again so not immediately hit same point
+         rd = reflect(rd, norm);
+         ro = p + (rd * DISTANCE_MIN);
+         return res;
       }
-      t += d*0.85;   // NOTE: conservative DE for this shape - or some edges are marched through
+      t += d;
       if (t >= MAX_DEPTH) break;
    }
-   return vec4(0.0);
+   return vec4(Sky(rd), 0.0);
 }
 
-// Original method by David Hoskins
-#define GAMMA 0.8
-#define CONTRAST 1.1
-#define SATURATION 1.2
-#define BRIGHTNESS 1.2
-vec3 PostEffects(vec3 rgb, vec2 xy)
+vec4 MarchEnd(vec3 ro, vec3 rd)
 {
-	rgb = pow(rgb, vec3(GAMMA));
-	rgb = mix(vec3(.5), mix(vec3(dot(vec3(.2125, .7154, .0721), rgb*BRIGHTNESS)), rgb*BRIGHTNESS, SATURATION), CONTRAST);
-	rgb *= .4+0.5*pow(40.0*xy.x*xy.y*(1.0-xy.x)*(1.0-xy.y), 0.2 );	
-	return rgb;
-}
-
-mat4 rotationMatrix(vec3 v, float angle)
-{
-   float c = cos(radians(angle));
-   float s = sin(radians(angle));
-   
-   return mat4(c + (1.0 - c) * v.x * v.x, (1.0 - c) * v.x * v.y - s * v.z, (1.0 - c) * v.x * v.z + s * v.y, 0.0,
-      (1.0 - c) * v.x * v.y + s * v.z, c + (1.0 - c) * v.y * v.y, (1.0 - c) * v.y * v.z - s * v.x, 0.0,
-      (1.0 - c) * v.x * v.z - s * v.y, (1.0 - c) * v.y * v.z + s * v.x, c + (1.0 - c) * v.z * v.z, 0.0,
-      0.0, 0.0, 0.0, 1.0);
-}
-
-mat4 translate(vec3 v) {
-   return mat4(1.0,0.0,0.0,0.0,
-      0.0,1.0,0.0,0.0,
-      0.0,0.0,1.0,0.0,
-      v.x,v.y,v.z,1.0);
-}
-
-mat4 scale4(float s) {
-   return mat4(s,0.0,0.0,0.0,
-      0.0,s,0.0,0.0,
-      0.0,0.0,s,0.0,
-      0.0,0.0,0.0,1.0);
+   float t = 0.0;
+   float d = 1.0;
+   for (int i=0; i<RAY_DEPTH; i++)
+   {
+      vec3 p = ro + rd * t;
+      d = Dist(p);
+      if (d < DISTANCE_MIN)
+      {
+         vec3 norm = GetNormal(p, d);
+         return Shading(p, rd, norm);
+      }
+      t += d;
+      if (t >= MAX_DEPTH) break;
+   }
+   return vec4(Sky(rd), 0.0);
 }
 
 void main()
 {
    const int ANTIALIAS_SAMPLES = 4;
-   const int DOF_SAMPLES = 8;
+   //const int DOF_SAMPLES = 16;
    
-   // precalc - once...
-   //vec3 animRot1 = vec3(sin(time*0.0235)+1.0, cos(time*0.0177)+1.0, sin(time*0.0023)+1.0);
-   mat4 fracRotation2 = rotationMatrix(normalize(Rot2), Angle2);
-   mat4 fracRotation1 = rotationMatrix(normalize(Rot1), Angle1);
-   M = fracRotation2 * translate(Offset) * scale4(Scale) * translate(-Offset) * fracRotation1;
+   //const bool dof = false;
    
+   vec3 cpos = cameraPos;
+   if (rotateWorld) cpos.y = sin(time)*4.0 + 4.0;
+
    vec4 res = vec4(0.0);
    
    if (antialias)
    {
+      vec2 p;
       float d_ang = 2.*PI / float(ANTIALIAS_SAMPLES);
       float ang = d_ang * 0.33333;
-      float r = 0.3;
-      vec2 p;
+      float r = 0.5;
       for (int i = 0; i < ANTIALIAS_SAMPLES; i++)
       {
          p = vec2((gl_FragCoord.x + cos(ang)*r) / resolution.x, (gl_FragCoord.y + sin(ang)*r) / resolution.y);
-         vec3 ro = cameraPos;
-         vec3 rd = normalize(GetRay(cameraLookat-cameraPos, p));
+         vec3 ro = cpos;
+         vec3 rd = normalize(GetRay(cameraLookat-cpos, p));
          vec4 _res = March(ro, rd);
-         if (_res.a != 0.0) res.xyz += clamp(Shading(_res.xyz, rd, GetNormal(_res.xyz, _res.a)).xyz, 0.0, 1.0);
-         else res.xyz += Sky(rd);
+         if (_res.a != 0.0)  // reflection sample needed
+         {
+            vec4 res1 = March(ro, rd);
+            if (res1.a != 0.0)  // another reflection sample needed
+            {
+               // add in colour from another reflection march step
+               _res.rgb += res1.rgb * _res.a * 0.666;  // the amount of ref was returned on the first surface hit test - divide by number of reflection passes
+               vec4 res2 = MarchEnd(ro, rd);
+               _res.rgb += res2.rgb * _res.a * 0.333;  // the amount of ref was returned on the first surface hit test - divide by number of reflection passes
+            }
+            else
+            {
+               // add in colour from a reflection march step
+               _res.rgb += res1.rgb * _res.a;     // the amount of ref was returned on the first surface hit test - divide by number of reflection passes
+            }
+         }
+         res.rgb += _res.rgb;
          ang += d_ang;
       }
-      res.xyz /= float(ANTIALIAS_SAMPLES);
-      res.xyz = PostEffects(res.xyz, p);
-   }
-   else if (dof)
-   {
-      vec2 p = gl_FragCoord.xy / resolution.xy;
-      vec3 ro = cameraPos;
-      vec3 rd = normalize(GetRay(cameraLookat-cameraPos, p));
-      vec4 _res = March(ro, rd);
-      
-      float d_ang = 2.*PI / float(DOF_SAMPLES);
-      float ang = d_ang * 0.33333;
-      // cheap DOF!
-      float r = abs(cameraLookat.z - _res.z) * 3.0;
-      for (int i = 0; i < DOF_SAMPLES; i++)
-      {
-         p = vec2((gl_FragCoord.x + cos(ang)*r) / resolution.x, (gl_FragCoord.y + sin(ang)*r) / resolution.y);
-         ro = cameraPos;
-         rd = normalize(GetRay(cameraLookat-cameraPos, p));
-         _res = March(ro, rd);
-         if (_res.a != 0.0) res.xyz += clamp(Shading(_res.xyz, rd, GetNormal(_res.xyz, _res.a)).xyz, 0.0, 1.0);
-         else res.xyz += Sky(rd);
-         ang += d_ang;
-      }
-      res.xyz /= float(DOF_SAMPLES);
-      res.xyz = PostEffects(res.xyz, p);
+      res.rgb /= float(ANTIALIAS_SAMPLES);
    }
    else
    {
       vec2 p = gl_FragCoord.xy / resolution.xy;
-      vec3 ro = cameraPos;
-      vec3 rd = normalize(GetRay(cameraLookat-cameraPos, p));
+      vec3 ro = cpos;
+      vec3 rd = normalize(GetRay(cameraLookat-cpos, p));
       res = March(ro, rd);
-      if (res.a != 0.0) res.xyz = clamp(Shading(res.xyz, rd, GetNormal(res.xyz, res.a)).xyz, 0.0, 1.0);
-      else res.xyz = Sky(rd);
-      res.xyz = PostEffects(res.xyz, p);
+      if (res.a != 0.0)  // reflection sample needed
+      {
+         vec4 res1 = March(ro, rd);
+         if (res1.a != 0.0)  // another reflection sample needed
+         {
+            // add in colour from another reflection march step
+            res.rgb += res1.rgb * res.a * 0.666;  // the amount of ref was returned on the first surface hit test - divide by number of reflection passes
+            vec4 res2 = MarchEnd(ro, rd);
+            res.rgb += res2.rgb * res.a * 0.333;  // the amount of ref was returned on the first surface hit test - divide by number of reflection passes
+         }
+         else
+         {
+            // add in colour from a reflection march step
+            res.rgb += res1.rgb * res.a;     // the amount of ref was returned on the first surface hit test - divide by number of reflection passes
+         }
+      }
    }
    
-   gl_FragColor = vec4(res.xyz, 1.0);
+   gl_FragColor = vec4(res.rgb, 1.0);
 }
       </script>
       
@@ -325,53 +330,35 @@ var requestAnimationFrame = window.requestAnimationFrame || window.webkitRequest
                             function(c) {window.setTimeout(c, 15)};
 var config = {
    camera: {
-      x: 1.0, y: 0.0, z: 2.0
+      x: 0.0, y: 5.0, z: -3.0
    },
    lookat: {
-      x: 0.0, y: 0.0, z: 0.0
+      x: 0.0, y: 0.5, z: 0.5
    },
    lightDir: {
-      x: -14.0, y: 1.5, z: 15.0
+      x: 2.0, y: 2.4, z: -1.0
    },
    lightColour: {
-      r: 1.2, g: 0.7, b: 0.2
+      r: 1.6, g: 1.8, b: 2.2
    },
    surface: {
-      specular: 8.0,
-      specularHardness: 32.0,
-      diffuse: 0.6,
-      ambientFactor: 0.3
+      specular: 1.0,
+      specularHardness: 16.0,
+      diffuse: 0.25,
+      ambientFactor: 0.2
    },
    global: {
       ao: true,
       shadows: true,
       rotateWorld: true,
-      antialias: "None"// None|Classic|DOF
-   },
-   polyhedra: {
-      /*iterations: 2,
-      scale: 3.75,
-      size: .65,
-      angle1: 25,
-      angle2: 75*/
-      iterations: 1,
-      scale: 3.33,
-      size: .42,
-      angle1: 62,
-      angle2: -53,
-      rot1: {
-         x: 1.0,
-         y: 1.0,
-         z: 1.0
-      }
+      antialias: "None"// None|Classic
    }
 };
 
-var pause = false;
-var stats = new Stats();
 var aspect, gl;
 function init()
 {
+   var pause = false;
    document.addEventListener('keydown', function(e) {
       switch (e.keyCode)
       {
@@ -385,45 +372,39 @@ function init()
    var mobile = (navigator.userAgent.indexOf("Android") !== -1);
    var gui = new dat.GUI();
    var panel = gui.addFolder('Camera Position');
-   panel.add(config.camera, "x").min(-16.0).max(16.0).step(0.1);
+   panel.add(config.camera, "x").min(-160.0).max(160.0).step(0.1);
    panel.add(config.camera, "y").min(-16.0).max(16.0).step(0.1);
-   panel.add(config.camera, "z").min(-64.0).max(64.0).step(0.1);
+   panel.add(config.camera, "z").min(-160.0).max(160.0).step(0.1);
+   //panel.open();
    panel = gui.addFolder('Camera LookAt');
-   panel.add(config.lookat, "x").min(-16.0).max(16.0).step(0.1);
+   panel.add(config.lookat, "x").min(-160.0).max(160.0).step(0.1);
    panel.add(config.lookat, "y").min(-16.0).max(16.0).step(0.1);
-   panel.add(config.lookat, "z").min(-16.0).max(16.0).step(0.1);
+   panel.add(config.lookat, "z").min(-160.0).max(160.0).step(0.1);
+   //if (!mobile) panel.open();
    panel = gui.addFolder('Light Direction');
    panel.add(config.lightDir, "x").min(-16.0).max(16.0).step(0.1);
    panel.add(config.lightDir, "y").min(-16.0).max(16.0).step(0.1);
    panel.add(config.lightDir, "z").min(-16.0).max(16.0).step(0.1);
+   if (!mobile) panel.open();
    panel = gui.addFolder('Light Colour');
    panel.add(config.lightColour, "r").min(0.0).max(3.0).step(0.1);
    panel.add(config.lightColour, "g").min(0.0).max(3.0).step(0.1);
    panel.add(config.lightColour, "b").min(0.0).max(3.0).step(0.1);
+   if (!mobile) panel.open();
    panel = gui.addFolder('Surface');
    panel.add(config.surface, "specular").min(0).max(64);
    panel.add(config.surface, "specularHardness").min(16).max(1024).step(16);
    panel.add(config.surface, "diffuse").min(0).max(1).step(0.05);
    panel.add(config.surface, "ambientFactor").min(0).max(1).step(0.05);
+   //panel.open();
    panel = gui.addFolder('Global');
-   panel.add(config.global, "antialias", ["None", "Classic", "DOF"]).name("Anti Alias");
+   panel.add(config.global, "antialias", ["None", "Classic"]).name("Anti Alias");
    panel.add(config.global, "shadows").name("Shadows");
    panel.add(config.global, "ao").name("Ambient Occlusion");
    panel.add(config.global, "rotateWorld").name("Rotate World");
    if (!mobile) panel.open();
-   panel = gui.addFolder('Polyhedra');
-   panel.add(config.polyhedra, "iterations").min(1).max(5).step(1);
-   panel.add(config.polyhedra, "scale").min(0).max(5);
-   panel.add(config.polyhedra, "size").min(0).max(2);
-   panel.add(config.polyhedra, "angle1").min(-180).max(180).step(1);
-   panel.add(config.polyhedra, "angle2").min(-180).max(180).step(1);
-   if (!mobile) panel.open();
-   panel = gui.addFolder('Polyhedra Rot1');
-   panel.add(config.polyhedra.rot1, "x").min(0.0).max(16.0).step(0.1);
-   panel.add(config.polyhedra.rot1, "y").min(0.0).max(16.0).step(0.1);
-   panel.add(config.polyhedra.rot1, "z").min(0.0).max(16.0).step(0.1);
-   if (!mobile) panel.open();
    
+   var stats = new Stats();
    document.body.appendChild(stats.domElement);
    
    // create webgl context on the canvas element
@@ -541,43 +522,14 @@ function init()
          program.rotateWorld = gl.getUniformLocation(program, "rotateWorld");
          gl.uniform1f(program.rotateWorld, config.global.rotateWorld);
          
+         program.antialias = gl.getUniformLocation(program, "antialias");
+         gl.uniform1f(program.antialias, (config.global.antialias === "Classic"));
+         
          program.ao = gl.getUniformLocation(program, "ao");
          gl.uniform1f(program.ao, config.global.ao);
          
          program.shadows = gl.getUniformLocation(program, "shadows");
          gl.uniform1f(program.shadows, config.global.shadows);
-         
-         program.antialias = gl.getUniformLocation(program, "antialias");
-         gl.uniform1f(program.antialias, (config.global.antialias === "Classic"));
-         program.dof = gl.getUniformLocation(program, "dof");
-         gl.uniform1f(program.dof, (config.global.antialias === "DOF"));
-         
-         program.Iterations = gl.getUniformLocation(program, "Iterations");
-         gl.uniform1i(program.Iterations, config.polyhedra.iterations);
-         
-         program.Size = gl.getUniformLocation(program, "Size");
-         gl.uniform1f(program.Size, config.polyhedra.size);
-         
-         program.plnormal = gl.getUniformLocation(program, "plnormal");
-         gl.uniform3f(program.plnormal, 1,0,0); // NOTE: must be normalised!
-         
-         program.Offset = gl.getUniformLocation(program, "Offset");
-         gl.uniform3f(program.Offset, 0.850650808, 0.525731112, 0.0);
-         
-         program.Scale = gl.getUniformLocation(program, "Scale");
-         gl.uniform1f(program.Scale, config.polyhedra.scale);
-         
-         program.Angle1 = gl.getUniformLocation(program, "Angle1");
-         gl.uniform1f(program.Angle1, config.polyhedra.angle1);
-         
-         program.Rot1 = gl.getUniformLocation(program, "Rot1");
-         gl.uniform3f(program.Rot1, config.polyhedra.rot1.x, config.polyhedra.rot1.y, config.polyhedra.rot1.z);
-         
-         program.Angle2 = gl.getUniformLocation(program, "Angle2");
-         gl.uniform1f(program.Angle2, config.polyhedra.angle2);
-         
-         program.Rot2 = gl.getUniformLocation(program, "Rot2");
-         gl.uniform3f(program.Rot2, 1,1,1);
          
          program.aVertexPosition = gl.getAttribLocation(program, "aVertexPosition");
          gl.enableVertexAttribArray(program.aVertexPosition);
@@ -598,7 +550,7 @@ function init()
       <link href='http://fonts.googleapis.com/css?family=Open+Sans:400,300,600' rel='stylesheet' type='text/css'>
    </head>
    <body onload="init()">
-      <canvas id="canvas" width="640" height="640"></canvas>
+      <canvas id="canvas" width="768" height="512"></canvas>
       <a href="#" id="fullscreen">Toggle Full Screen</a>
       <a href="." id="back">Show me more awesome demos!</a>
    </body>

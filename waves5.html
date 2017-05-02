@@ -13,6 +13,7 @@
    
    If you want to understand this stuff read through the PDF and pouet.net links above!
 -->
+      <script src="scripts/utils.js"></script>
       <script src="scripts/dat.gui.min.js"></script>
       <script src="scripts/stats.min.js"></script>
       <script id="vertex" type="x-shader">
@@ -36,135 +37,132 @@ uniform vec3 lightDir;
 uniform vec3 lightColour;
 uniform float specular;
 uniform float specularHardness;
+uniform float fog;
 uniform vec3 diffuse;
-uniform float ambientFactor;
-uniform bool ao;
-uniform bool shadows;
 uniform bool postEffects;
-uniform bool rotateWorld;
 uniform bool moveCamera;
-uniform bool antialias;
+uniform bool reflections;
+uniform float attenDepth;
+uniform float attenScale;
+uniform float param;
 
-#define PI 3.14159265
+//#define AA
+
 #define GAMMA 0.8
 #define CONTRAST 1.1
 #define SATURATION 1.3
 #define BRIGHTNESS 1.3
-#define AO_SAMPLES 5
+#ifndef AA
+#define NOISE_PASSES 6
 #define RAY_DEPTH 256
-#define MAX_DEPTH 100.0
-#define SHADOW_RAY_DEPTH 32
-#define DISTANCE_MIN 0.001
+#define MAX_DEPTH 200.0
+#define DISTANCE_MIN 0.003
+#else
+#define ANTIALIAS_SAMPLES 16
+#define NOISE_PASSES 8
+#define RAY_DEPTH 256
+#define MAX_DEPTH 200.0
+#define DISTANCE_MIN 0.003
+#endif
+#define PI 3.14159265
 
-const vec2 delta = vec2(0.001, 0.);
+const vec3 WATER_COLOR = vec3(0.6,0.85,0.65);
+const vec3 SPECULAR_COLOR = vec3(1.1,0.8,0.6);
 
+const vec2 delta = vec2(DISTANCE_MIN, 0.);
 
-vec3 RotateZ(vec3 p, float a)
+float Hash(in float n)
 {
-   float c,s;
-   vec3 q=p;
-   c = cos(a);
-   s = sin(a);
-   p.x = c * q.x - s * q.y;
-   p.y = s * q.x + c * q.y;
-   return p;
+    return fract(sin(n)*43758.5453123);
 }
 
-// polynomial smooth functions (smoothing factor k = ~0.1)
-float smax(float a, float b, float k)
+float Noise(in vec2 x)
 {
-   float h = clamp(0.5+0.5*(b-a)/k, 0.0, 1.0);
-   return mix(a, b, h) - k*h*h;
+    vec2 p = floor(x);
+    vec2 f = fract(x);
+    f = f*f*(3.0-2.0*f);
+    float n = p.x + p.y*57.0;
+    float res = mix(mix( Hash(n+  0.0), Hash(n+  1.0),f.x),
+                    mix( Hash(n+ 57.0), Hash(n+ 58.0),f.x),f.y);
+    return res;
 }
 
-float Sphere(vec3 p, float s)
+//	FAST32_hash
+//	A very fast hashing function.  Requires 32bit support.
+//	http://briansharpe.wordpress.com/2011/11/15/a-fast-and-simple-32bit-floating-point-hash-function/
+void FAST32_hash_2D( vec2 gridcell, out vec4 hash_0, out vec4 hash_1 )
 {
-   return length(p)-s;
+   // gridcell is assumed to be an integer coordinate
+   const vec2 OFFSET = vec2( 26.0, 161.0 );
+   const float DOMAIN = 71.0;
+   const vec2 SOMELARGEFLOATS = vec2( 951.135664, 642.949883 );
+   vec4 P = vec4( gridcell.xy, gridcell.xy + 1.0 );
+   P = P - floor(P * ( 1.0 / DOMAIN )) * DOMAIN;
+   P += OFFSET.xyxy;
+   P *= P;
+   P = P.xzxz * P.yyww;
+   hash_0 = fract( P * ( 1.0 / SOMELARGEFLOATS.x ) );
+   hash_1 = fract( P * ( 1.0 / SOMELARGEFLOATS.y ) );
 }
 
-float HexPrism(vec3 p, vec2 h)
+vec2 Interpolation_C2( vec2 x ) { return x * x * x * (x * (x * 6.0 - 15.0) + 10.0); }
+
+//	Perlin Noise 2D  ( gradient noise )
+//	Return value range of -1.0->1.0
+//	http://briansharpe.files.wordpress.com/2011/11/perlinsample.jpg
+float Perlin2D( vec2 P )
 {
-   vec3 q = abs(p);
-   return max(q.z-h.y,max(q.x+q.y*0.57735,q.y*1.1547)-h.x);
+    //	establish our grid cell and unit position
+    vec2 Pi = floor(P);
+    vec4 Pf_Pfmin1 = P.xyxy - vec4( Pi, Pi + 1.0 );
+
+    //	calculate the hash.
+    vec4 hash_x, hash_y;
+    FAST32_hash_2D( Pi, hash_x, hash_y );
+
+    //	calculate the gradient results
+    vec4 grad_x = hash_x - 0.49999;
+    vec4 grad_y = hash_y - 0.49999;
+    vec4 grad_results = inversesqrt( grad_x * grad_x + grad_y * grad_y ) * ( grad_x * Pf_Pfmin1.xzxz + grad_y * Pf_Pfmin1.yyww );
+
+    //	Classic Perlin Interpolation
+    grad_results *= 1.4142135623730950488016887242097;
+    vec2 blend = Interpolation_C2( Pf_Pfmin1.xy );
+    vec4 blend2 = vec4( blend, vec2( 1.0 - blend ) );
+    return dot( grad_results, blend2.zxzx * blend2.wwyy );
 }
 
-float Plane(vec3 p, vec3 n)
+// Octave transform matrix from Alexander Alekseev aka TDM 
+mat2 octave_m = mat2(1.6,1.2,-1.2,1.6);
+
+// FBM Noise - mixing Value noise and Perlin Noise - also ridged turbulence at smaller octaves
+float FractalNoise(in vec2 xy)
 {
-   return dot(p, n);
+   float m = 1.25;
+   float w = 0.6;
+   float f = 0.0;
+   for (int i = 0; i < NOISE_PASSES; i++)
+   {
+      f += Noise(xy.xy+time*0.655) * m * 0.25;
+      if (i < 2)
+      {
+         f += Perlin2D(xy.yx-time*0.233) * w * 0.12;
+      }
+      else
+      {
+         // ridged turbulence at smaller scales - moves 4x faster
+         f += abs(Perlin2D(xy.yx-time*0.932) * w * 0.05)*1.75;
+      }
+      w *= 0.45;
+      m *= 0.35;
+      xy *= octave_m;
+   }
+   return f;
 }
 
-float ReplicateXZ(vec3 p, vec3 c)
-{
-   vec3 q = vec3(mod(p.x, c.x) - 0.5 * c.x, p.y, mod(p.z, c.z) - 0.5 * c.z);
-   return
-      min(
-         // ground plane - offset in the Y axis
-         Plane(q-vec3(0.,-0.85,0.), vec3(0.,1.,0.)),
-         // smoothly subtract spheres from our hexprism shape
-         smax(
-            // subtract one hex prism from another to make a hollow shape
-            max(
-               HexPrism(q, vec2(1.0,0.5)),
-               -HexPrism(q-vec3(0.,0.,0.25), vec2(0.8,1.0))
-            ),
-            // combine 6 offset spheres to make holes in the hollow hexprism shape
-            -min(
-               Sphere(q-vec3(0.,0.85,0.), 0.333),
-               min(
-                  Sphere(q-vec3(0.,-0.85,0.), 0.333),
-                  min(
-                     Sphere(q-vec3(0.75,0.45,0.), 0.333),
-                     min(
-                        Sphere(q-vec3(0.75,-0.45,0.), 0.333),
-                        min(
-                           Sphere(q-vec3(-0.75,0.45,0.), 0.333),
-                           Sphere(q-vec3(-0.75,-0.45,0.), 0.333)
-                        )
-                     )
-                  )
-               )
-            ),0.05
-         )
-      );
-}
-
-// This should return continuous positive values when outside and negative values inside,
-// which roughly indicate the distance of the nearest surface.
 float Dist(vec3 pos)
 {
-   if (rotateWorld) pos = RotateZ(pos, sin(time)*0.5);
-   return ReplicateXZ(pos, vec3(4.,0.,4.));
-}
-
-// Based on original by IQ
-float CalcAO(vec3 p, vec3 n)
-{
-   float r = 0.0;
-   float w = 1.0;
-   for (int i=1; i<=AO_SAMPLES; i++)
-   {
-      float d0 = float(i) * 0.3;
-      r += w * (d0 - Dist(p + n * d0));
-      w *= 0.5;
-   }
-   return 1.0 - r;
-}
-
-// Based on original code by IQ
-float SoftShadow(vec3 ro, vec3 rd, float k)
-{
-   float res = 1.0;
-   float t = 0.05;          // min-t see http://www.iquilezles.org/www/articles/rmshadows/rmshadows.htm
-   for (int i=0; i<SHADOW_RAY_DEPTH; i++)
-   {
-      if (t < 20.0)  // max-t
-      {
-         float h = Dist(ro + rd * t);
-         res = min(res, k*h/t);
-         t += h;
-      }
-   }
-   return clamp(res, 0.0, 1.0);
+   return dot(pos-vec3(0.,-FractalNoise(pos.xz),0.), vec3(0.,1.,0.));
 }
 
 vec3 GetNormal(vec3 pos)
@@ -182,44 +180,58 @@ vec3 Sky(in vec3 rd)
 {
    float sunAmount = max(dot(rd, lightDir), 0.0);
    float v = pow(1.0 - max(rd.y,0.0),6.);
-   vec3 sky = mix(vec3(.1, .2, .3), vec3(.32, .32, .32), v);
-   sky += lightColour * sunAmount * sunAmount * .25 + lightColour * min(pow(sunAmount, 800.0)*1.5, .3);
-   return sky;
+   vec3 sky = mix(vec3(.1, .2, .25)*1.5, vec3(.32, .32, .35)*1.5, v);
+   sky += SPECULAR_COLOR * pow(sunAmount, 200.0);
+   return clamp(sky, 0.0, 1.0);
 }
 
 // Fog routine - original by IQ
-vec3 Fog(vec3 rgb, vec3 rd, float distance)   // camera to point distance
+vec3 Fog(vec3 rgb, vec3 rd, float distance)
 {
-   const float b = 0.185;  //0.035;
-   float fogAmount = 1.0 - exp(-distance*b*b);
-   vec3 fogColor = Sky(rd);
+   float fogAmount = 1.0 - exp(-distance*fog);
+   vec3  fogColor = Sky(rd);
    return mix(rgb, fogColor, fogAmount);
 }
 
-// Based on a shading method by Ben Weston. Added AO and SoftShadows to original.
-vec4 Shading(vec3 pos, vec3 rd, vec3 norm, vec3 ro)
+vec3 Shading(vec3 pos, vec3 rd, vec3 norm, vec3 ro)
 {
-   vec3 heading = normalize(-rd + lightDir);
+   vec3 light = lightColour * max(0.0, dot(norm, lightDir));
+   vec3 view = normalize(-rd);
+   vec3 heading = normalize(view + lightDir);
    float spec = pow(max(0.0, dot(heading, norm)), specularHardness);
    
-   float sun = clamp(dot(norm, lightDir), 0.0, 1.0);
-   vec3 light = (sun * lightColour * diffuse) + (spec * specular * lightColour);
+   float fresnel = 0.0;
+   if (reflections)
+   {
+      fresnel = pow(1.0 - dot(view, norm), 5.0);
+      fresnel = mix(0.0, 1.0, min(1.0, fresnel));
+   }
    
-   if (shadows) light *= SoftShadow(pos, lightDir, 32.0);
-   if (ao) light += CalcAO(pos, norm) * ambientFactor;
+   light = (diffuse * light) + (spec * specular * SPECULAR_COLOR) * (1.0-fresnel);
+   
+   if (fresnel > 0.0)
+   {
+      vec3 refrd = reflect(rd, norm);
+      light += Sky(refrd) * fresnel;
+   }
+   
+   // attenuation
+   vec3 dist = pos - ro;
+   float atten = max(1.0 - dot(dist,dist) * 0.0001, 0.0);
+   light += WATER_COLOR * (pos.y - attenDepth) * attenScale * atten;
    
    light = Fog(light, rd, length(ro-pos));
    
-   return vec4(light, 1.0);
+   return light;
 }
 
 // Original method by David Hoskins
 vec3 PostEffects(vec3 rgb, vec2 xy)
 {
-	rgb = pow(rgb, vec3(GAMMA));
-	rgb = mix(vec3(.5), mix(vec3(dot(vec3(.2125, .7154, .0721), rgb*BRIGHTNESS)), rgb*BRIGHTNESS, SATURATION), CONTRAST);
-	rgb *= .4+0.5*pow(40.0*xy.x*xy.y*(1.0-xy.x)*(1.0-xy.y), 0.2 );	
-	return rgb;
+   rgb = pow(rgb, vec3(GAMMA));
+   rgb = mix(vec3(.5), mix(vec3(dot(vec3(.2125, .7154, .0721), rgb*BRIGHTNESS)), rgb*BRIGHTNESS, SATURATION), CONTRAST);
+   rgb *= .4+0.5*pow(40.0*xy.x*xy.y*(1.0-xy.x)*(1.0-xy.y), 0.2 ); 
+   return rgb;
 }
 
 // Camera function by TekF
@@ -244,7 +256,7 @@ vec4 March(vec3 ro, vec3 rd)
    {
       vec3 p = ro + rd * t;
       d = Dist(p);
-      if (abs(d) < DISTANCE_MIN)
+      if (d < DISTANCE_MIN)
       {
          return vec4(p, 1.0);
       }
@@ -256,43 +268,39 @@ vec4 March(vec3 ro, vec3 rd)
 
 void main()
 {
-   const int ANTIALIAS_SAMPLES = 4;
-   
-   vec4 res = vec4(0.0);
-   
    vec3 off = vec3(0.0);
-   if (moveCamera) off.z -= time*10.0;
+   if (moveCamera) off.z -= time*0.25;
+   vec4 res = vec4(0.0);
+
+#ifndef AA
+   vec2 p = gl_FragCoord.xy / resolution.xy;
+   vec3 ro = cameraPos + off;
+   vec3 rd = normalize(GetRay((cameraLookat-off)-cameraPos+off, p));
    
-   if (antialias)
+   res = March(ro, rd);
+   if (res.a == 1.0) res.rgb = Shading(res.rgb, rd, GetNormal(res.rgb), ro).rgb;
+   else res.rgb = Sky(rd);
+#else
+   vec2 p;
+   float d_ang = 2.*PI / float(ANTIALIAS_SAMPLES);
+   float ang = d_ang * 0.33333;
+   float r = 0.3;
+   for (int i = 0; i < ANTIALIAS_SAMPLES; i++)
    {
-      vec2 p;
-      float d_ang = 2.*PI / float(ANTIALIAS_SAMPLES);
-      float ang = d_ang * 0.33333;
-      float r = 0.3;
-      for (int i = 0; i < ANTIALIAS_SAMPLES; i++)
-      {
-         p = vec2((gl_FragCoord.x + cos(ang)*r) / resolution.x, (gl_FragCoord.y + sin(ang)*r) / resolution.y);
-         vec3 ro = cameraPos + off;
-         vec3 rd = normalize(GetRay(cameraLookat-cameraPos, p));
-         vec4 _res = March(ro, rd);
-         if (_res.a == 1.0) res.rgb += Shading(_res.rgb, rd, GetNormal(_res.rgb), ro).rgb;
-         else res.rgb += Sky(rd);
-         ang += d_ang;
-      }
-      res.rgb /= float(ANTIALIAS_SAMPLES);
-      if (postEffects) res.rgb = PostEffects(res.rgb, p);
-   }
-   else
-   {
-      vec2 p = gl_FragCoord.xy / resolution.xy;
+      p = vec2((gl_FragCoord.x + cos(ang)*r) / resolution.x, (gl_FragCoord.y + sin(ang)*r) / resolution.y);
       vec3 ro = cameraPos + off;
       vec3 rd = normalize(GetRay((cameraLookat-off)-cameraPos+off, p));
-      
-      res = March(ro, rd);
-      if (res.a == 1.0) res.rgb = Shading(res.rgb, rd, GetNormal(res.rgb), ro).rgb;
-      else res.rgb = Sky(rd);
-      if (postEffects) res.rgb = PostEffects(res.rgb, p);
+   
+      vec4 _res = March(ro, rd);
+      if (_res.a == 1.0) _res.rgb = Shading(_res.rgb, rd, GetNormal(_res.rgb), ro).rgb;
+      else _res.rgb = Sky(rd);
+      ang += d_ang;
+      res.rgb += _res.rgb;
    }
+   res /= float(ANTIALIAS_SAMPLES);
+#endif
+
+   if (postEffects) res.rgb = PostEffects(res.rgb, p);
    
    gl_FragColor = vec4(res.rgb, 1.0);
 }
@@ -304,30 +312,30 @@ var requestAnimationFrame = window.requestAnimationFrame || window.webkitRequest
                             function(c) {window.setTimeout(c, 15)};
 var config = {
    camera: {
-      x: 9.0, y: 4.5, z: 0.0
+      x: 0.0, y: 2.0, z: 0.0
    },
    lookat: {
-      x: 0.0, y: -10.0, z: -100.0 
+      x: -125.0, y: -85.0, z: -95.0
    },
    lightDir: {
-      x: -1.4, y: 0.8, z: -1.0
+      x: -1.0, y: 0.8, z: -1.0
    },
    lightColour: {
-      r: 3.0, g: 1.4, b: 0.3
+      r: 0.7, g: 0.8, b: 0.9
    },
    surface: {
-      specular: 64.0,
-      specularHardness: 256.0,
-      diffuse: 0.4,
-      ambientFactor: 0.2
+      specular: 6.0,
+      specularHardness: 512.0,
+      diffuse: 0.1,
+      attenDepth: -0.52,
+      attenScale: 0.2
    },
    global: {
-      ao: true,
-      shadows: true,
+      fog: 0.02,
+      reflections: true,
       postEffects: true,
-      antialias: "None",// None|Classic
-      rotateWorld: true,
-      moveCamera: true
+      moveCamera: true,
+      param: 0.2
    }
 };
 
@@ -367,24 +375,24 @@ function init()
    panel.add(config.lightColour, "r").min(0).max(3).step(0.1);
    panel.add(config.lightColour, "g").min(0).max(3).step(0.1);
    panel.add(config.lightColour, "b").min(0).max(3).step(0.1);
-   if (!mobile) panel.open();
+   //if (!mobile) panel.open();
    panel = gui.addFolder('Surface');
    panel.add(config.surface, "specular").min(0).max(64);
    panel.add(config.surface, "specularHardness").min(16).max(1024).step(16);
    panel.add(config.surface, "diffuse").min(0).max(1).step(0.05);
-   panel.add(config.surface, "ambientFactor").min(0).max(1).step(0.05);
-   //panel.open();
+   panel.add(config.surface, "attenDepth").min(-1.0).max(0.0).step(0.01);
+   panel.add(config.surface, "attenScale").min(0.05).max(1.0).step(0.01);
+   panel.open();
    panel = gui.addFolder('Global');
-   panel.add(config.global, "antialias", ["None", "Classic"]).name("Anti Alias");
-   panel.add(config.global, "shadows").name("Shadows");
-   panel.add(config.global, "ao").name("Ambient Occlusion");
+   panel.add(config.global, "fog").min(0).max(1).step(0.01);
+   panel.add(config.global, "reflections").name("Reflections");
    panel.add(config.global, "postEffects").name("Post Effects");
-   panel.add(config.global, "rotateWorld").name("Rotate World");
    panel.add(config.global, "moveCamera").name("Move Camera");
+   panel.add(config.global, "param").min(0.01).max(3.0).step(0.01);
    if (!mobile) panel.open();
    
    document.body.appendChild(stats.domElement);
-
+   
    // create webgl context on the canvas element
    var canvas = document.getElementById("canvas");
    aspect = canvas.width / canvas.height;
@@ -494,26 +502,26 @@ function init()
          program.diffuse = gl.getUniformLocation(program, "diffuse");
          gl.uniform3f(program.diffuse, config.surface.diffuse,config.surface.diffuse,config.surface.diffuse);
          
-         program.ambientFactor = gl.getUniformLocation(program, "ambientFactor");
-         gl.uniform1f(program.ambientFactor, config.surface.ambientFactor);
-         
-         program.rotateWorld = gl.getUniformLocation(program, "rotateWorld");
-         gl.uniform1f(program.rotateWorld, config.global.rotateWorld);
-         
          program.moveCamera = gl.getUniformLocation(program, "moveCamera");
          gl.uniform1f(program.moveCamera, config.global.moveCamera);
          
          program.postEffects = gl.getUniformLocation(program, "postEffects");
          gl.uniform1f(program.postEffects, config.global.postEffects);
          
-         program.ao = gl.getUniformLocation(program, "ao");
-         gl.uniform1f(program.ao, config.global.ao);
+         program.reflections = gl.getUniformLocation(program, "reflections");
+         gl.uniform1f(program.reflections, config.global.reflections);
+
+         program.fog = gl.getUniformLocation(program, "fog");
+         gl.uniform1f(program.fog, config.global.fog);
          
-         program.shadows = gl.getUniformLocation(program, "shadows");
-         gl.uniform1f(program.shadows, config.global.shadows);
+         program.attenDepth = gl.getUniformLocation(program, "attenDepth");
+         gl.uniform1f(program.attenDepth, config.surface.attenDepth);
+
+         program.attenScale = gl.getUniformLocation(program, "attenScale");
+         gl.uniform1f(program.attenScale, config.surface.attenScale);
          
-         program.antialias = gl.getUniformLocation(program, "antialias");
-         gl.uniform1f(program.antialias, (config.global.antialias === "Classic"));
+         program.param = gl.getUniformLocation(program, "param");
+         gl.uniform1f(program.param, config.global.param);
          
          program.aVertexPosition = gl.getAttribLocation(program, "aVertexPosition");
          gl.enableVertexAttribArray(program.aVertexPosition);
@@ -522,18 +530,19 @@ function init()
          gl.drawArrays(gl.TRIANGLES, 0, numItems);
          
          stats.end();
+         //pause = true;
       }
       requestAnimationFrame(f);
    })();
 }
       </script>
-      <script src="scripts/utils.js"></script>
       <link rel="stylesheet" href="../../reset.css">
       <link rel="stylesheet" href="./page.css">
       <link href='http://fonts.googleapis.com/css?family=Open+Sans:400,300,600' rel='stylesheet' type='text/css'>
    </head>
    <body onload="init()">
-      <canvas id="canvas" width="768" height="512"></canvas>
+      <canvas id="canvas" width="1024" height="680"></canvas>
+      <!--<canvas id="canvas" width="3840" height="2160"></canvas>-->
       <a href="#" id="fullscreen">Toggle Full Screen</a>
       <a href="." id="back">Show me more awesome demos!</a>
    </body>

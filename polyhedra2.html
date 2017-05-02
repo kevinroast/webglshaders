@@ -66,10 +66,10 @@ mat4 M;
 #define RAY_DEPTH 128
 #define MAX_DEPTH 100.0
 #define SHADOW_RAY_DEPTH 32
-#define DISTANCE_MIN 0.0005
+#define DISTANCE_MIN 0.0001
 #define PI 3.14159265
 
-const vec2 delta = vec2(0.0001, 0.);
+const vec2 delta = vec2(DISTANCE_MIN/10.0, 0.0);
 
 
 vec3 RotateY(vec3 p, float a)
@@ -104,7 +104,8 @@ float Dist(vec3 z)
    //combine DEs... explore different combinations
    float dmin=dot(z-vec3(Size,0.,0.),plnormal);
 
-   for(int i=0; i<8; i++){
+   for (int i=0; i<4; i++)
+   {
       // Rotate, scale, rotate (we need to cast to a 4-component vector).
       z = (M*vec4(z,1.0)).xyz;
       s /= Scale;
@@ -118,12 +119,12 @@ float Dist(vec3 z)
       t=dot(z,n1); if (t>0.0) { z-=2.0*t*n1; }
       t=dot(z,n2); if (t>0.0) { z-=2.0*t*n2; }
       z = abs(z);
-            
+      
       //combine DEs... explore different combinations ;)
       //the base DE is the distance to the plane going through vec3(Size,0.,0.) and which normal is plnormal
       dmin=max(dmin,s*dot(z-vec3(Size,0.,0.),plnormal));
       
-      if (i == Iterations) break;
+      if (i == Iterations - 1) break;
    }
    return abs(dmin);
 }
@@ -146,7 +147,7 @@ float CalcAO(vec3 p, vec3 n)
 float SoftShadow(vec3 ro, vec3 rd, float k)
 {
    float res = 1.0;
-   float t = 0.1;          // min-t see http://www.iquilezles.org/www/articles/rmshadows/rmshadows.htm
+   float t = 0.01;          // min-t see http://www.iquilezles.org/www/articles/rmshadows/rmshadows.htm
    for (int i=0; i<SHADOW_RAY_DEPTH; i++)
    {
       float h = Dist(ro + rd * t);
@@ -154,16 +155,20 @@ float SoftShadow(vec3 ro, vec3 rd, float k)
       t += h;
       if (t > 10.0) break; // max-t
    }
-   return clamp(res, 0.0, 1.0);
+   return res;
 }
 
-vec3 GetNormal(vec3 pos)
+vec3 GetNormal(vec3 pos, float s)
 {
    vec3 n;
-   n.x = Dist( pos + delta.xyy ) - Dist( pos - delta.xyy );
-   n.y = Dist( pos + delta.yxy ) - Dist( pos - delta.yxy );
-   n.z = Dist( pos + delta.yyx ) - Dist( pos - delta.yyx );
-   
+   // optimized normal calculation - based on final distance to surface see 704 demo
+   n.x = s - Dist(pos - delta.xyy);
+   n.y = s - Dist(pos - delta.yxy);
+   n.z = s - Dist(pos - delta.yyx);
+   //n.x = Dist( pos + delta.xyy ) - Dist( pos - delta.xyy );
+   //n.y = Dist( pos + delta.yxy ) - Dist( pos - delta.yxy );
+   //n.z = Dist( pos + delta.yyx ) - Dist( pos - delta.yyx );
+
    return normalize(n);
 }
 
@@ -175,7 +180,7 @@ vec4 Shading(vec3 pos, vec3 rd, vec3 norm)
    
    float spec = pow(max(0.0, dot(heading, norm)), specularHardness);
    light = (diffuse * light) + (spec * specular * lightColour);
-   if (shadows) light *= SoftShadow(pos, lightDir, 16.0);
+   if (shadows) light *= SoftShadow(pos, lightDir, 64.0);
    if (ao) light += CalcAO(pos, norm) * ambientFactor;
 
    return vec4(light, 1.0);
@@ -214,11 +219,11 @@ vec4 March(vec3 ro, vec3 rd)
    {
       vec3 p = ro + rd * t;
       d = Dist(p);
-      if (abs(d) < DISTANCE_MIN)
+      if (d < DISTANCE_MIN)
       {
-         return vec4(p, 1.0);
+         return vec4(p, d);
       }
-      t += d;
+      t += d*.85;
       if (t >= MAX_DEPTH) break;
    }
    return vec4(0.0);
@@ -272,7 +277,7 @@ void main()
          vec3 ro = cameraPos;
          vec3 rd = normalize(GetRay(cameraLookat-cameraPos, p));
          vec4 _res = March(ro, rd);
-         if (_res.a == 1.0) res.xyz += clamp(Shading(_res.xyz, rd, GetNormal(_res.xyz)).xyz, 0.0, 1.0);
+         if (_res.a != 0.0) res.xyz += clamp(Shading(_res.xyz, rd, GetNormal(_res.xyz, _res.a)).xyz, 0.0, 1.0);
          else res.xyz += Sky(rd);
          ang += d_ang;
       }
@@ -295,7 +300,7 @@ void main()
          ro = cameraPos;
          rd = normalize(GetRay(cameraLookat-cameraPos, p));
          _res = March(ro, rd);
-         if (_res.a == 1.0) res.xyz += clamp(Shading(_res.xyz, rd, GetNormal(_res.xyz)).xyz, 0.0, 1.0);
+         if (_res.a != 0.0) res.xyz += clamp(Shading(_res.xyz, rd, GetNormal(_res.xyz, _res.a)).xyz, 0.0, 1.0);
          else res.xyz += Sky(rd);
          ang += d_ang;
       }
@@ -307,7 +312,7 @@ void main()
       vec3 ro = cameraPos;
       vec3 rd = normalize(GetRay(cameraLookat-cameraPos, p));
       res = March(ro, rd);
-      if (res.a == 1.0) res.xyz = clamp(Shading(res.xyz, rd, GetNormal(res.xyz)).xyz, 0.0, 1.0);
+      if (res.a != 0.0) res.xyz = clamp(Shading(res.xyz, rd, GetNormal(res.xyz, res.a)).xyz, 0.0, 1.0);
       else res.xyz = Sky(rd);
    }
    
@@ -351,7 +356,7 @@ var config = {
       size: .65,
       angle1: 25,
       angle2: 75*/
-      iterations: 1,
+      iterations: 2,
       scale: 3.33,
       size: .42,
       angle1: 62,
@@ -359,9 +364,11 @@ var config = {
    }
 };
 
+var pause = false;
+var stats = new Stats();
+var aspect, gl;
 function init()
 {
-   var pause = false;
    document.addEventListener('keydown', function(e) {
       switch (e.keyCode)
       {
@@ -403,7 +410,7 @@ function init()
    panel.add(config.global, "rotateWorld").name("Rotate World");
    if (!mobile) panel.open();
    panel = gui.addFolder('Polyhedra');
-   panel.add(config.polyhedra, "iterations").min(1).max(8).step(1);
+   panel.add(config.polyhedra, "iterations").min(1).max(4).step(1);
    panel.add(config.polyhedra, "scale").min(0).max(5);
    panel.add(config.polyhedra, "size").min(0).max(2);
    //vec3 plnormal 
@@ -415,15 +422,14 @@ function init()
    
    if (!mobile) panel.open();
    
-   var stats = new Stats();
    document.body.appendChild(stats.domElement);
    
    // create webgl context on the canvas element
-   var canvas = document.getElementById("canvas"),
-       aspect = canvas.width / canvas.height;
+   var canvas = document.getElementById("canvas");
+   aspect = canvas.width / canvas.height;
    try
    {
-      var gl = canvas.getContext("experimental-webgl");
+      gl = canvas.getContext("experimental-webgl");
    }
    catch (e)
    {
@@ -584,8 +590,14 @@ function init()
    })();
 }
       </script>
+      <script src="scripts/utils.js"></script>
+      <link rel="stylesheet" href="../../reset.css">
+      <link rel="stylesheet" href="./page.css">
+      <link href='http://fonts.googleapis.com/css?family=Open+Sans:400,300,600' rel='stylesheet' type='text/css'>
    </head>
    <body onload="init()">
-      <canvas id="canvas" width="640" height="640">
+      <canvas id="canvas" width="640" height="640"></canvas>
+      <a href="#" id="fullscreen">Toggle Full Screen</a>
+      <a href="." id="back">Show me more awesome demos!</a>
    </body>
 </html>

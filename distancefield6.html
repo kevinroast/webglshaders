@@ -51,10 +51,10 @@ uniform bool antialias;
 #define SATURATION 1.2
 #define BRIGHTNESS 1.2
 #define AO_SAMPLES 5
-#define RAY_DEPTH 256
-#define MAX_DEPTH 100.0
+#define RAY_DEPTH 200
+#define MAX_DEPTH 200.0
 #define SHADOW_RAY_DEPTH 16
-#define DISTANCE_MIN 0.001
+#define DISTANCE_MIN 0.003
 
 const vec2 delta = vec2(DISTANCE_MIN, 0.);
 
@@ -121,7 +121,7 @@ float CalcAO(vec3 p, vec3 n)
       r += w * (d0 - Dist(p + n * d0));
       w *= 0.5;
    }
-   return 1.0 - clamp(r,0.0,1.0);
+   return 1.0 - r;
 }
 
 float CalcSSS(vec3 ro, vec3 rd)
@@ -130,11 +130,11 @@ float CalcSSS(vec3 ro, vec3 rd)
    float weight = 0.5;
    for (int i=1; i<=AO_SAMPLES; i++)
    {
-      float delta = pow(float(i), 2.5) * DISTANCE_MIN * 64.0;
+      float delta = pow(float(i), 2.5) * 0.001 * 64.0;
       total += -weight * min(0.0, Dist(ro+rd * delta));
       weight *= 0.5;
    }
-   return clamp(total, 0.0, 1.0);
+   return total;
 }
 
 // Based on original code by IQ
@@ -152,12 +152,17 @@ float SoftShadow(vec3 ro, vec3 rd, float k)
    return clamp(res, 0.0, 1.0);
 }
 
-vec3 GetNormal(vec3 pos)
+vec3 GetNormal(vec3 pos, float s)
 {
    vec3 n;
-   n.x = Dist( pos + delta.xyy ) - Dist( pos - delta.xyy );
-   n.y = Dist( pos + delta.yxy ) - Dist( pos - delta.yxy );
-   n.z = Dist( pos + delta.yyx ) - Dist( pos - delta.yyx );
+   //n.x = Dist( pos + delta.xyy ) - Dist( pos - delta.xyy );
+   //n.y = Dist( pos + delta.yxy ) - Dist( pos - delta.yxy );
+   //n.z = Dist( pos + delta.yyx ) - Dist( pos - delta.yyx );
+   
+   // optimized normal calculation - based on final distance to surface see 704 demo
+   n.x = s - Dist(pos - delta.xyy);
+   n.y = s - Dist(pos - delta.yxy);
+   n.z = s - Dist(pos - delta.yyx);
    
    return normalize(n);
 }
@@ -181,8 +186,7 @@ vec3 Sky(in vec3 rd)
    float v = pow(1.0 - max(rd.y,0.0),6.);
    vec3 sky = mix(vec3(.1, .2, .3), vec3(.32, .32, .32), v);
    sky += lightColour * sunAmount * sunAmount * .25 + lightColour * min(pow(sunAmount, 800.0)*1.5, .3);
-   
-   return clamp(sky, 0.0, 1.0);
+   return sky;
 }
 
 // Original method by David Hoskins
@@ -210,15 +214,15 @@ vec3 GetRay(vec3 dir, vec2 pos)
 
 vec4 March(vec3 ro, vec3 rd)
 {
-   float t = 0.0;
-   float d = 1.0;
+   float t = 1.0;
+   float d = 0.0;
    for (int i=0; i<RAY_DEPTH; i++)
    {
       vec3 p = ro + rd * t;
       d = Dist(p);
-      if (abs(d) < DISTANCE_MIN)
+      if (d < DISTANCE_MIN)
       {
-         return vec4(p, 1.0);
+         return vec4(p, d);
       }
       t += d;
       if (t >= MAX_DEPTH) break;
@@ -229,9 +233,9 @@ vec4 March(vec3 ro, vec3 rd)
 void main()
 {
    const int ANTIALIAS_SAMPLES = 4;
-   const int DOF_SAMPLES = 16;
+   //const int DOF_SAMPLES = 16;
    
-   const bool dof = false;
+   //const bool dof = false;
 
    vec3 off = vec3(0.0);
    if (moveCamera) off.z -= time*5.0;
@@ -250,14 +254,14 @@ void main()
          vec3 ro = cameraPos + off;
          vec3 rd = normalize(GetRay(cameraLookat-cameraPos, p));
          vec4 _res = March(ro, rd);
-         if (_res.a == 1.0) res.xyz += clamp(Shading(_res.xyz, rd, GetNormal(_res.xyz)).xyz, 0.0, 1.0);
+         if (_res.a != 0.0) res.xyz += Shading(_res.xyz, rd, GetNormal(_res.xyz, _res.a)).xyz;
          else res.xyz += Sky(rd);
          ang += d_ang;
       }
       res.xyz /= float(ANTIALIAS_SAMPLES);
       if (postEffects) res.xyz = PostEffects(res.xyz, p);
    }
-   else if (dof)
+   /*else if (dof)
    {
       vec2 p = gl_FragCoord.xy / resolution.xy;
       vec3 ro = cameraPos + off;
@@ -274,20 +278,20 @@ void main()
          ro = cameraPos + off;
          rd = normalize(GetRay(cameraLookat-cameraPos, p));
          _res = March(ro, rd);
-         if (_res.a == 1.0) res.xyz += clamp(Shading(_res.xyz, rd, GetNormal(_res.xyz)).xyz, 0.0, 1.0);
+         if (_res.a != 0.0) res.xyz += Shading(_res.xyz, rd, GetNormal(_res.xyz, _res.a)).xyz;
          else res.xyz += Sky(rd);
          ang += d_ang;
       }
       res.xyz /= float(DOF_SAMPLES);
       if (postEffects) res.xyz = PostEffects(res.xyz, p);
-   }
+   }*/
    else
    {
       vec2 p = gl_FragCoord.xy / resolution.xy;
       vec3 ro = cameraPos + off;
       vec3 rd = normalize(GetRay(cameraLookat-cameraPos, p));
       res = March(ro, rd);
-      if (res.a == 1.0) res.xyz = clamp(Shading(res.xyz, rd, GetNormal(res.xyz)).xyz, 0.0, 1.0);
+      if (res.a != 0.0) res.xyz = Shading(res.xyz, rd, GetNormal(res.xyz, res.a)).xyz;
       else res.xyz = Sky(rd);
       if (postEffects) res.xyz = PostEffects(res.xyz, p);
    }
@@ -331,6 +335,7 @@ var config = {
    }
 };
 
+var aspect, gl;
 function init()
 {
    var pause = false;
@@ -386,11 +391,11 @@ function init()
    document.body.appendChild(stats.domElement);
    
    // create webgl context on the canvas element
-   var canvas = document.getElementById("canvas"),
-       aspect = canvas.width / canvas.height;
+   var canvas = document.getElementById("canvas");
+   aspect = canvas.width / canvas.height;
    try
    {
-      var gl = canvas.getContext("experimental-webgl");
+      gl = canvas.getContext("experimental-webgl");
    }
    catch (e)
    {
@@ -527,9 +532,14 @@ function init()
    })();
 }
       </script>
+      <script src="scripts/utils.js"></script>
+      <link rel="stylesheet" href="../../reset.css">
+      <link rel="stylesheet" href="./page.css">
+      <link href='http://fonts.googleapis.com/css?family=Open+Sans:400,300,600' rel='stylesheet' type='text/css'>
    </head>
    <body onload="init()">
-      <canvas id="canvas" width="768" height="512"-->
-      <!--canvas id="canvas" width="128" height="96"-->
+      <canvas id="canvas" width="768" height="512"></canvas>
+      <a href="#" id="fullscreen">Toggle Full Screen</a>
+      <a href="." id="back">Show me more awesome demos!</a>
    </body>
 </html>

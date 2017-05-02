@@ -13,7 +13,6 @@
    
    If you want to understand this stuff read through the PDF and pouet.net links above!
 -->
-      <script src="scripts/utils.js"></script>
       <script src="scripts/dat.gui.min.js"></script>
       <script src="scripts/stats.min.js"></script>
       <script id="vertex" type="x-shader">
@@ -33,47 +32,56 @@ uniform float time;
 uniform vec2 resolution;
 uniform vec3 cameraPos;
 uniform vec3 cameraLookat;
-uniform vec3 lightDir;
-uniform vec3 lightColour;
-uniform float specular;
-uniform float specularHardness;
+uniform vec3 sunDir;
+uniform vec3 sunColour;
 uniform vec3 diffuse;
+uniform float ambient;
+uniform bool ao;
+uniform bool shadows;
 uniform bool postEffects;
 uniform bool moveCamera;
-uniform bool reflections;
+uniform bool fog;
+uniform float fogC;
+uniform float fogB;
+uniform sampler2D texture0;
 
 #define GAMMA 0.8
-#define CONTRAST 1.1
-#define SATURATION 1.3
-#define BRIGHTNESS 1.3
-#define RAY_DEPTH 128
-#define MAX_DEPTH 100.0
-#define DISTANCE_MIN 0.001
+#define CONTRAST 1.2
+#define SATURATION 1.4
+#define BRIGHTNESS 1.4
+#define RAY_DEPTH 256
+#define MAX_DEPTH 256.0
+#define SHADOW_RAY_DEPTH 48
+#define AO_SAMPLES 4
+#define FRACT_NOISE_DEPTH 7
+#define DISTANCE_MIN 0.003
 #define PI 3.14159265
 
 const vec2 delta = vec2(DISTANCE_MIN, 0.);
+const vec3 skyColour = vec3(0.75, 0.75, 0.65);
+const vec3 rockColour = vec3(1.0,  0.8, 0.6);
 
-float Hash(in float n)
+float NoiseL(in vec2 x)
 {
-    return fract(sin(n)*43758.5453123);
+   return texture2D(texture0,(x+vec2(0.5,0.5))/512.0,-100.0).x;
 }
 
 float Noise(in vec2 x)
 {
-    vec2 p = floor(x);
-    vec2 f = fract(x);
-    f = f*f*(3.0-2.0*f);
-    float n = p.x + p.y*57.0;
-    float res = mix(mix( Hash(n+  0.0), Hash(n+  1.0),f.x),
-                    mix( Hash(n+ 57.0), Hash(n+ 58.0),f.x),f.y);
-    return res;
+   vec2 p = floor(x);
+   vec2 f = fract(x);
+   f = f*f*(3.0-2.0*f);
+   float n = p.x + p.y*57.0;
+   float res = mix(mix( texture2D(texture0,(n+vec2(0.5,0.5))/512.0,-100.0).x, texture2D(texture0,(n+1.0+vec2(0.5,0.5))/512.0,-100.0).x,f.x),
+                   mix( texture2D(texture0,(n+57.0+vec2(0.5,0.5))/512.0,-100.0).x, texture2D(texture0,(n+58.0+vec2(0.5,0.5))/512.0,-100.0).x,f.x),f.y);
+   return res;
 }
 
 float FractalNoise(in vec2 xy)
 {
    float w = 0.7;
    float f = 0.0;
-   for (int i = 0; i < 3; i++)
+   for (int i = 0; i < FRACT_NOISE_DEPTH - 2 - 2; i++)
    {
       f += Noise(xy) * w;
       w *= 0.5;
@@ -82,25 +90,48 @@ float FractalNoise(in vec2 xy)
    return f;
 }
 
-float FractalNoise4(in vec2 xy)
+float FractalNoiseM(in vec2 xy)
 {
    float w = 0.7;
    float f = 0.0;
-   for (int i = 0; i < 4; i++)
+   for (int i = 0; i < FRACT_NOISE_DEPTH - 2; i++)
    {
       f += Noise(xy) * w;
       w *= 0.5;
       xy *= 2.333;
    }
    return f;
+}
+
+float FractalNoiseH(in vec2 xy)
+{
+   float w = 0.7;
+   float f = 0.0;
+   for (int i = 0; i < FRACT_NOISE_DEPTH; i++)
+   {
+      f += Noise(xy) * w;
+      w *= 0.5;
+      xy *= 2.333;
+   }
+   return f;
+}
+
+float Terrain(vec2 pos)
+{
+   return Noise(pos.xy*0.899)*.5335 + FractalNoiseH(pos.yx*0.571)*0.693 - Noise(cos(pos.yx*0.673)+sin(pos.xy*0.615));
+}
+
+float TerrainM(vec2 pos)
+{
+   return Noise(pos.xy*0.899)*.5335 + FractalNoiseM(pos.yx*0.571)*0.693 - Noise(cos(pos.yx*0.673)+sin(pos.xy*0.615));
 }
 
 // This should return continuous positive values when outside and negative values inside,
 // which roughly indicate the distance of the nearest surface.
+// NOTE! for increased performance, but lower Shadow/AO/intersect accuracy, change Terrain() to TerrainM() here
 float Dist(vec3 pos)
 {
-   float height = Noise(pos.xz)*.1753 + Noise(pos.xy*(cos(time*.11)*.13))*.255 + Noise(pos.zx*(0.3+(sin(time*.1)*.1))) + FractalNoise4(pos.xz)*.1753;
-   return dot(pos-vec3(0.,-height,0.), vec3(0.,1.,0.));
+   return pos.y - TerrainM(pos.xz);
 }
 
 vec3 GetNormal(vec3 pos)
@@ -113,8 +144,17 @@ vec3 GetNormal(vec3 pos)
    return normalize(n);
 }
 
+vec3 CalcNormal(in vec3 pos, float t)
+{
+   // NOTE: subtle changes to this value affect the sharpness of the normal - 0.001 is about same as GetNormal() above
+   vec2 eps = vec2(0.001*t, 0.0);
+   return normalize( vec3( Terrain(pos.xz-eps.xy) - Terrain(pos.xz+eps.xy),
+                           2.0*eps.x,
+                           Terrain(pos.xz-eps.yx) - Terrain(pos.xz+eps.yx) ) );
+}
+
 // Original method by David Hoskins
-vec3 GetClouds(in vec3 sky, in vec3 rd)
+vec3 Clouds(in vec3 sky, in vec3 rd)
 {
    if (rd.y < 0.01) return sky;
    float v = (200.0-cameraPos.y)/rd.y;
@@ -123,18 +163,16 @@ vec3 GetClouds(in vec3 sky, in vec3 rd)
    rd.xz *= .010;
    float f = (FractalNoise(rd.xz) - 0.35) * 5.0;
    // Uses the ray's y component for horizon fade of fixed colour clouds...
-   return mix(sky, vec3(0.55, 0.55, 0.85), clamp(f*rd.y - 0.1, 0.0, 1.0));
+   return mix(sky, skyColour, clamp(f*rd.y - 0.1, 0.0, 1.0));
 }
 
 // Original method by David Hoskins
 vec3 Sky(in vec3 rd)
 {
-   float sunAmount = max(dot(rd, lightDir), 0.0);
+   float sunAmount = max(dot(rd, sunDir), 0.0);
    float v = pow(1.0 - max(rd.y,0.0),6.);
    vec3 sky = mix(vec3(.1, .2, .3), vec3(.32, .32, .32), v);
-   sky += lightColour * sunAmount * sunAmount * .25 + lightColour * min(pow(sunAmount, 800.0)*1.5, .3);
-   
-   sky = GetClouds(sky, rd);
+   sky += sunColour * sunAmount * sunAmount * .25 + sunColour * min(pow(sunAmount, 800.0)*1.5, .3);
    
    return clamp(sky, 0.0, 1.0);
 }
@@ -142,36 +180,93 @@ vec3 Sky(in vec3 rd)
 // Fog routine - original by IQ
 vec3 Fog(vec3 rgb, vec3 rd, float distance)   // camera to point distance
 {
-    const float b = 0.04;
-    float fogAmount = 1.0 - exp(-distance*b);
-    vec3  fogColor = Sky(rd);
-    return mix(rgb, fogColor, fogAmount);
+   const float b = 0.015;
+   float fogAmount = 1.0 - exp(-distance*b);
+   vec3 fogColor = Sky(rd);
+   return mix(rgb, fogColor, fogAmount);
 }
 
-// Based on a shading method by Ben Weston.
+vec3 DepthFog(in vec3  rgb,in float distance, in vec3 rd, in vec3 ro)
+{
+   float fogAmount = 0.0;
+   if (fog) fogAmount = fogC * exp(-ro.y*fogB) * (1.0-exp(-distance*rd.y*fogB))/rd.y;
+   return mix(rgb, Sky(rd), clamp(fogAmount, 0.0, 1.0));
+}
+
+// Based on original code by IQ
+float SoftShadow(vec3 ro, vec3 rd)
+{
+   float res = 1.0;
+   float k = 16.0;
+   float t = 0.1;    // min-t see http://www.iquilezles.org/www/articles/rmshadows/rmshadows.htm
+   for (int i=0; i<SHADOW_RAY_DEPTH; i++)
+   {
+      if (t < 16.0)  // max-t
+      {
+         float h = Dist(ro + rd * t);
+         res = min(res, k*h/t);
+         t += h;
+      }
+   }
+   return clamp(res, 0.0, 1.0);
+}
+
+// Based on original code by IQ
+float CalcAO(vec3 p, vec3 n)
+{
+   float r = 0.0;
+   float w = 1.0;
+   for (int i=1; i<=AO_SAMPLES; i++)
+   {
+      float d0 = float(i) * 0.2;
+      r += w * (d0 - Dist(p + n * d0));
+      w *= 0.5;
+   }
+   return 1.0 - clamp(r,0.0,1.0);
+}
+
+// "Natural light" shading - main sun light with soft shadows, sky light with AO and indirect sun bounce light with AO
+// see http://iquilezles.org/www/articles/outdoorslighting/outdoorslighting.htm
 vec3 Shading(vec3 pos, vec3 rd, vec3 norm, vec3 ro)
 {
-   vec3 light = lightColour * max(0.0, dot(norm, lightDir));
-   vec3 view = normalize(-rd);
-   vec3 heading = normalize(view + lightDir);
-   float spec = pow(max(0.0, dot(heading, norm)), specularHardness);
+   float sun = clamp(dot(norm, sunDir), 0.0, 1.0);
    
-   float fresnel = 0.0;
-   if (reflections)
-   {
-      fresnel = pow(1.0 - dot(view, norm), 8.0);
-      fresnel = mix(.01, 1.0, min(1.0, fresnel));
+   // start with rock colour, add in snow on peaks and grass in valleys
+   float snow = NoiseL(norm.yz*2.111);
+   float grass = NoiseL(norm.xy*0.973) - 0.2;
+   vec3 colour = rockColour;
+   // gives a more abrubt cut-off where snow is mixed into rock colour
+   if (pos.y > snow - 0.2) {
+      // apply norm.y so right angled surfaces receive less snow colour
+      colour = mix(colour, vec3(1.5), clamp(pos.y - snow + norm.y, 0.0, 1.0));
+   }
+   colour = mix(colour, vec3(0.1,0.7,0.2), 1.0 - clamp(pos.y + 0.25 + grass, 0.0, 1.0));
+   
+   vec3 light = sun * sunColour * diffuse;
+   if (shadows) {
+      // colorize penumbras
+      light *= pow(vec3(SoftShadow(pos, sunDir)), vec3(1.0, 1.2, 1.5));
    }
    
-   light = clamp((diffuse * light) + (spec * specular * lightColour), 0.0, 1.0) * (1.0-fresnel);
-   if (fresnel > 0.01)
-   {
-      vec3 refrd = reflect(rd, norm);
-      light += Sky(refrd) * fresnel;
+   // sky light with AO
+   float occ = 0.0;
+   if (ao) {
+      occ = CalcAO(pos, norm) * ambient;
    }
-   light = Fog(light, rd, length(ro-pos));
+   float sky = clamp(0.5 + 0.5 * norm.y, 0.0, 1.0);
+   light += sky * vec3(0.20, 0.20, 0.24) * occ;
    
-   return light;
+   // indirect light with AO
+   float ind = clamp(dot(norm, normalize(sunDir * vec3(-1.0,0.0,-1.0))), 0.0, 1.0);
+   light += ind * colour*0.2 * occ;
+   
+   colour *= light;
+   
+   // fogging
+   colour = DepthFog(colour, length(ro-pos), rd, ro);
+   //colour = Fog(colour, rd, length(ro-pos));
+   
+   return colour;
 }
 
 // Original method by David Hoskins
@@ -197,36 +292,53 @@ vec3 GetRay(vec3 dir, vec2 pos)
    return dir + right*pos.x + up*pos.y;
 }
 
-vec4 March(vec3 ro, vec3 rd)
+void main()
 {
+   vec3 off = vec3(0.0);
+   if (moveCamera) {
+      off.z -= time*1.0;
+      off.y += cos(time*0.5)*0.5;
+   }
+   
+   // position and ray direction
+   vec2 p = gl_FragCoord.xy / resolution.xy;
+   vec3 ro = cameraPos + off;
+   vec3 rd = normalize(GetRay((cameraLookat-off)-cameraPos+off, p));
+   
+   // NOTE: for final AA - could move march function out again - as GetNormal() is fine for slow AA render pass
+   
+   // march ray
+   // NOTE: see a number of tweaks here compared to my standard ray march loops:
+   //       1. using d<DISTANCE_MIN - i.e. removed the abs(d) to avoid holes in the fractal noise terrain
+   //       2. d * 0.75 to ensure small steps towards the terrain - avoids losing accuracy near terrain peaks (causing 'warping' of noise texture)
+   //       3. DISTANCE_MIN can be larger using the above changes, BUT higher RAY_DEPTH is needed to avoid missing distant features
+   //       4. still need MAX_DEPTH to avoid painful framerate
+   vec4 res = vec4(0.0);
    float t = 0.0;
    float d = 1.0;
    for (int i=0; i<RAY_DEPTH; i++)
    {
       vec3 p = ro + rd * t;
       d = Dist(p);
-      if (abs(d) < DISTANCE_MIN)
+      if (d < DISTANCE_MIN)
       {
-         return vec4(p, 1.0);
+         res = vec4(p, 1.0);  // HIT
+         break;
       }
-      t += d;
-      if (t >= MAX_DEPTH) break;
+      t += d * 0.75;
+      if (t > MAX_DEPTH) break;
    }
-   return vec4(0.0);
-}
-
-void main()
-{
-   vec3 off = vec3(0.0);
-   if (moveCamera) off.z -= time*5.0;
    
-   vec2 p = gl_FragCoord.xy / resolution.xy;
-   vec3 ro = cameraPos + off;
-   vec3 rd = normalize(GetRay((cameraLookat-off)-cameraPos+off, p));
+   if (res.a == 0.0)
+   {
+      res.rgb = Clouds(Sky(rd), rd);
+   }
+   else
+   {
+      res.rgb = clamp(Shading(res.rgb, rd, CalcNormal(res.rgb, t), ro).rgb, 0.0, 1.0);
+   }
    
-   vec4 res = March(ro, rd);
-   if (res.a == 1.0) res.rgb = clamp(Shading(res.rgb, rd, GetNormal(res.rgb), ro).rgb, 0.0, 1.0);
-   else res.rgb = Sky(rd);
+   
    if (postEffects) res.rgb = PostEffects(res.rgb, p);
    
    gl_FragColor = vec4(res.rgb, 1.0);
@@ -239,34 +351,48 @@ var requestAnimationFrame = window.requestAnimationFrame || window.webkitRequest
                             function(c) {window.setTimeout(c, 15)};
 var config = {
    camera: {
-      x: 0.0, y: 5.0, z: 0.0
+      x: 0.0, y: 2.0, z: 0.0
    },
    lookat: {
-      x: -125.0, y: -20.0, z: -95.0
+      x: 25.0, y: -7.5, z: -65.0
    },
-   lightDir: {
-      x: -1.0, y: 0.25, z: -1.0
+   sunDir: {
+      x: 1.0, y: 1.3, z: -4.0
    },
-   lightColour: {
-      r: 0.6, g: 0.8, b: 1.4
+   sunColour: {
+      r: 1.4, g: 1.0, b: 0.6
    },
    surface: {
-      specular: 64.0,
-      specularHardness: 512.0,
-      diffuse: 0.2
+      diffuse: 0.4,
+      ambient: 0.3
    },
    global: {
-      reflections: true,
+      ao: true,
+      shadows: true,
       postEffects: true,
-      moveCamera: true
+      moveCamera: true,
+      fog: true,
+      fogB: 0.1,
+      fogC: 0.2
    }
 };
 
 var pause = false;
 var stats = new Stats();
-var aspect, gl;
 function init()
 {
+   var img = new Image();
+   img.onload = function() {
+      loaded([img]);
+   };
+   img.src = "./noise512.png";
+}
+
+var _images;
+var aspect, gl;
+function loaded(images)
+{
+   _images = images;
    document.addEventListener('keydown', function(e) {
       switch (e.keyCode)
       {
@@ -289,29 +415,32 @@ function init()
    panel.add(config.lookat, "y").min(-100).max(100).step(0.1);
    panel.add(config.lookat, "z").min(-100).max(100).step(0.1);
    if (!mobile) panel.open();
-   panel = gui.addFolder('Light Direction');
-   panel.add(config.lightDir, "x").min(-10).max(10).step(0.1);
-   panel.add(config.lightDir, "y").min(-10).max(10).step(0.1);
-   panel.add(config.lightDir, "z").min(-10).max(10).step(0.1);
+   panel = gui.addFolder('Sun Direction');
+   panel.add(config.sunDir, "x").min(-10).max(10).step(0.1);
+   panel.add(config.sunDir, "y").min(-10).max(10).step(0.1);
+   panel.add(config.sunDir, "z").min(-10).max(10).step(0.1);
    if (!mobile) panel.open();
-   panel = gui.addFolder('Light Colour');
-   panel.add(config.lightColour, "r").min(0).max(3).step(0.1);
-   panel.add(config.lightColour, "g").min(0).max(3).step(0.1);
-   panel.add(config.lightColour, "b").min(0).max(3).step(0.1);
+   panel = gui.addFolder('Sun Colour');
+   panel.add(config.sunColour, "r").min(0).max(3).step(0.1);
+   panel.add(config.sunColour, "g").min(0).max(3).step(0.1);
+   panel.add(config.sunColour, "b").min(0).max(3).step(0.1);
    if (!mobile) panel.open();
    panel = gui.addFolder('Surface');
-   panel.add(config.surface, "specular").min(0).max(64);
-   panel.add(config.surface, "specularHardness").min(16).max(1024).step(16);
    panel.add(config.surface, "diffuse").min(0).max(1).step(0.05);
+   panel.add(config.surface, "ambient").min(0).max(1).step(0.05);
    //panel.open();
    panel = gui.addFolder('Global');
-   panel.add(config.global, "reflections").name("Reflections");
+   panel.add(config.global, "shadows").name("Shadows");
+   panel.add(config.global, "ao").name("Ambient Occlusion");
    panel.add(config.global, "postEffects").name("Post Effects");
    panel.add(config.global, "moveCamera").name("Move Camera");
+   panel.add(config.global, "fog").name("Fog");
+   panel.add(config.global, "fogB").min(0.01).max(1).step(0.01);
+   panel.add(config.global, "fogC").min(0.01).max(1).step(0.01);
    if (!mobile) panel.open();
    
    document.body.appendChild(stats.domElement);
-
+   
    // create webgl context on the canvas element
    var canvas = document.getElementById("canvas");
    aspect = canvas.width / canvas.height;
@@ -327,6 +456,15 @@ function init()
    gl.viewport(0, 0, canvas.width, canvas.height);
    gl.clearColor(0, 0, 0, 1);
    gl.clear(gl.COLOR_BUFFER_BIT);
+   
+   // textures
+   var noiseTexture = gl.createTexture();
+   gl.bindTexture(gl.TEXTURE_2D, noiseTexture);
+   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, _images[0]);
+   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_NEAREST);
+   gl.generateMipmap(gl.TEXTURE_2D);
+   gl.bindTexture(gl.TEXTURE_2D, null);
    
    // get the vertex and fragment shader source
    var v = document.getElementById("vertex").firstChild.nodeValue;
@@ -402,24 +540,21 @@ function init()
          program.cameraLookat = gl.getUniformLocation(program, "cameraLookat");
          gl.uniform3f(program.cameraLookat, config.lookat.x, config.lookat.y, config.lookat.z);
          
-         program.lightDir = gl.getUniformLocation(program, "lightDir");
+         program.sunDir = gl.getUniformLocation(program, "sunDir");
          // pre normalise light dir
-         var x = config.lightDir.x, y = config.lightDir.y, z = config.lightDir.z;
+         var x = config.sunDir.x, y = config.sunDir.y, z = config.sunDir.z;
          var len = x*x + y*y + z*z;
          len = 1.0 / Math.sqrt(len);
-         gl.uniform3f(program.lightDir, config.lightDir.x*len, config.lightDir.y*len, config.lightDir.z*len);
+         gl.uniform3f(program.sunDir, config.sunDir.x*len, config.sunDir.y*len, config.sunDir.z*len);
          
-         program.lightColour = gl.getUniformLocation(program, "lightColour");
-         gl.uniform3f(program.lightColour, config.lightColour.r, config.lightColour.g, config.lightColour.b);
-         
-         program.specular = gl.getUniformLocation(program, "specular");
-         gl.uniform1f(program.specular, config.surface.specular);
-         
-         program.specularHardness = gl.getUniformLocation(program, "specularHardness");
-         gl.uniform1f(program.specularHardness, config.surface.specularHardness);
+         program.sunColour = gl.getUniformLocation(program, "sunColour");
+         gl.uniform3f(program.sunColour, config.sunColour.r, config.sunColour.g, config.sunColour.b);
          
          program.diffuse = gl.getUniformLocation(program, "diffuse");
          gl.uniform3f(program.diffuse, config.surface.diffuse,config.surface.diffuse,config.surface.diffuse);
+         
+         program.ambient = gl.getUniformLocation(program, "ambient");
+         gl.uniform1f(program.ambient, config.surface.ambient);
          
          program.moveCamera = gl.getUniformLocation(program, "moveCamera");
          gl.uniform1f(program.moveCamera, config.global.moveCamera);
@@ -427,8 +562,23 @@ function init()
          program.postEffects = gl.getUniformLocation(program, "postEffects");
          gl.uniform1f(program.postEffects, config.global.postEffects);
          
-         program.reflections = gl.getUniformLocation(program, "reflections");
-         gl.uniform1f(program.reflections, config.global.reflections);
+         program.ao = gl.getUniformLocation(program, "ao");
+         gl.uniform1f(program.ao, config.global.ao);
+         
+         program.shadows = gl.getUniformLocation(program, "shadows");
+         gl.uniform1f(program.shadows, config.global.shadows);
+         
+         program.fog = gl.getUniformLocation(program, "fog");
+         gl.uniform1f(program.fog, config.global.fog);
+         
+         program.fogB = gl.getUniformLocation(program, "fogB");
+         gl.uniform1f(program.fogB, config.global.fogB);
+         
+         program.fogC = gl.getUniformLocation(program, "fogC");
+         gl.uniform1f(program.fogC, config.global.fogC);
+         
+         gl.bindTexture(gl.TEXTURE_2D, noiseTexture);
+         gl.uniform1i(gl.getUniformLocation(program, "texture0"), 0);
          
          program.aVertexPosition = gl.getAttribLocation(program, "aVertexPosition");
          gl.enableVertexAttribArray(program.aVertexPosition);
@@ -442,6 +592,7 @@ function init()
    })();
 }
       </script>
+      <script src="scripts/utils.js"></script>
       <link rel="stylesheet" href="../../reset.css">
       <link rel="stylesheet" href="./page.css">
       <link href='http://fonts.googleapis.com/css?family=Open+Sans:400,300,600' rel='stylesheet' type='text/css'>

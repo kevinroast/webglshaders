@@ -44,10 +44,13 @@ uniform bool rotateWorld;
 uniform bool antialias;
 
 #define GAMMA 0.8
-#define AO_SAMPLES 5
+#define CONTRAST 1.2
+#define SATURATION 1.4
+#define BRIGHTNESS 1.4
+#define AO_SAMPLES 4
 #define RAY_DEPTH 256
 #define MAX_DEPTH 200.0
-#define SHADOW_RAY_DEPTH 16
+#define SHADOW_RAY_DEPTH 32
 #define DISTANCE_MIN 0.001
 #define PI 3.14159265
 
@@ -102,7 +105,8 @@ float MandleBox(vec3 pos)
 // which roughly indicate the distance of the nearest surface.
 float Dist(vec3 pos)
 {
-   if (rotateWorld) pos = RotateY(pos, sin(time*0.05)*PI);
+   if (rotateWorld) pos = RotateY(pos, sin(time*0.04)*PI);
+   if (pos.y > 1.0) return 10000.0;
    return MandleBox(pos);
 }
 
@@ -117,22 +121,22 @@ float CalcAO(vec3 p, vec3 n)
       r += w * (d0 - Dist(p + n * d0));
       w *= 0.5;
    }
-   return 1.0 - clamp(r,0.0,1.0);
+   return clamp(r,0.0,1.0);
 }
 
 // Based on original code by IQ
 float SoftShadow(vec3 ro, vec3 rd, float k)
 {
    float res = 1.0;
-   float t = 0.1;          // min-t see http://www.iquilezles.org/www/articles/rmshadows/rmshadows.htm
+   float t = 0.01;          // min-t see http://www.iquilezles.org/www/articles/rmshadows/rmshadows.htm
    for (int i=0; i<SHADOW_RAY_DEPTH; i++)
    {
-      if (t < 20.0)  // max-t
+      if (t < 5.0)  // max-t
       {
          float h = Dist(ro + rd * t);
          res = min(res, k*h/t);
          t += h;
-      }
+      } else break;
    }
    return clamp(res, 0.0, 1.0);
 }
@@ -150,13 +154,13 @@ vec3 GetNormal(vec3 pos)
 // Based on a shading method by Ben Weston. Added AO and SoftShadows to original.
 vec4 Shading(vec3 pos, vec3 rd, vec3 norm)
 {
-   vec3 light = lightColour * max(0.0, dot(norm, lightDir));
-   vec3 heading = normalize(-rd + lightDir);
-   float spec = 0.0;
-   if (specular != 0.0) spec = pow(max(0.0, dot(heading, norm)), specularHardness);
+   float sun = clamp(dot(norm, lightDir), 0.0, 1.0);
    
-   light = (diffuse * light) + (spec * specular * lightColour);
-   if (shadows) light *= SoftShadow(pos, lightDir, 16.0);
+   vec3 heading = normalize(-rd + lightDir);
+   float spec = pow(max(0.0, dot(heading, norm)), specularHardness);
+   
+   vec3 light = (diffuse * sun * lightColour) + (spec * specular * lightColour);
+   if (shadows) light *= SoftShadow(pos, lightDir, 32.0);
    if (ao) light += CalcAO(pos, norm) * ambientFactor;
    return vec4(light, 1.0);
 }
@@ -204,12 +208,21 @@ vec4 March(vec3 ro, vec3 rd)
    return vec4(0.0);
 }
 
+// Original method by David Hoskins
+vec3 PostEffects(vec3 rgb, vec2 xy)
+{
+   rgb = pow(rgb, vec3(GAMMA));
+   rgb = mix(vec3(.5), mix(vec3(dot(vec3(.2125, .7154, .0721), rgb*BRIGHTNESS)), rgb*BRIGHTNESS, SATURATION), CONTRAST);
+   rgb *= .4+0.5*pow(40.0*xy.x*xy.y*(1.0-xy.x)*(1.0-xy.y), 0.2 ); 
+   return rgb;
+}
+
 void main()
 {
    const int ANTIALIAS_SAMPLES = 4;
    
    vec4 res = vec4(0.0);
-   
+   vec2 p;
    if (antialias)
    {
       float d_ang = 2.*PI / float(ANTIALIAS_SAMPLES);
@@ -217,7 +230,7 @@ void main()
       float r = .3;
       for (int i = 0; i < ANTIALIAS_SAMPLES; i++)
       {
-         vec2 p = vec2((gl_FragCoord.x + cos(ang)*r) / resolution.x, (gl_FragCoord.y + sin(ang)*r) / resolution.y);
+         p = vec2((gl_FragCoord.x + cos(ang)*r) / resolution.x, (gl_FragCoord.y + sin(ang)*r) / resolution.y);
          vec3 ro = cameraPos;
          vec3 rd = normalize(GetRay(cameraLookat-cameraPos, p));
          vec4 _res = March(ro, rd);
@@ -229,7 +242,7 @@ void main()
    }
    else
    {
-      vec2 p = gl_FragCoord.xy / resolution.xy;
+      p = gl_FragCoord.xy / resolution.xy;
       vec3 ro = cameraPos;
       vec3 rd = normalize(GetRay(cameraLookat-cameraPos, p));
       res = March(ro, rd);
@@ -237,7 +250,7 @@ void main()
       else res.xyz = Sky(res.xyz);
    }
    
-   gl_FragColor = vec4(res.xyz, 1.0);
+   gl_FragColor = vec4(PostEffects(res.rgb, p), 1.0);
 }
       </script>
       
@@ -253,16 +266,16 @@ var config = {
       x: 0.0, y: 0.0, z: 0.0
    },
    lightDir: {
-      x: -2.0, y: 0.8, z: -1.0
+      x: 2.0, y: 4.5, z: -1.5
    },
    lightColour: {
-      r: 2.0, g: 1.8, b: 1.5
+      r: 1.4, g: 1.1, b: 0.8
    },
    surface: {
-      specular: 0.0,
-      specularHardness: 256.0,
-      diffuse: 0.35,
-      ambientFactor: 0.85
+      specular: 0.5,
+      specularHardness: 8.0,
+      diffuse: 0.25,
+      ambientFactor: 0.1
    },
    global: {
       ao: true,
@@ -272,9 +285,11 @@ var config = {
    }
 };
 
+var pause = false;
+var stats = new Stats();
+var aspect, gl;
 function init()
 {
-   var pause = false;
    document.addEventListener('keydown', function(e) {
       switch (e.keyCode)
       {
@@ -320,15 +335,14 @@ function init()
    panel.add(config.global, "rotateWorld").name("Rotate World");
    if (!mobile) panel.open();
    
-   var stats = new Stats();
    document.body.appendChild(stats.domElement);
    
    // create webgl context on the canvas element
-   var canvas = document.getElementById("canvas"),
-       aspect = canvas.width / canvas.height;
+   var canvas = document.getElementById("canvas");
+   aspect = canvas.width / canvas.height;
    try
    {
-      var gl = canvas.getContext("experimental-webgl");
+      gl = canvas.getContext("experimental-webgl");
    }
    catch (e)
    {
@@ -460,8 +474,14 @@ function init()
    })();
 }
       </script>
+      <script src="scripts/utils.js"></script>
+      <link rel="stylesheet" href="../../reset.css">
+      <link rel="stylesheet" href="./page.css">
+      <link href='http://fonts.googleapis.com/css?family=Open+Sans:400,300,600' rel='stylesheet' type='text/css'>
    </head>
    <body onload="init()">
-      <canvas id="canvas" width="1024" height="720">
+      <canvas id="canvas" width="1024" height="720"></canvas>
+      <a href="#" id="fullscreen">Toggle Full Screen</a>
+      <a href="." id="back">Show me more awesome demos!</a>
    </body>
 </html>

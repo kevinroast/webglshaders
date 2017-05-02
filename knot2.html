@@ -301,7 +301,7 @@ void main()
       float d_ang = 2.*PI / float(DOF_SAMPLES);
       float ang = d_ang * 0.33333;
       // cheap DOF!
-      float r = abs(cameraLookat.z - _res.z) * 3.0;
+      float r = abs(cameraLookat.z - _res.z) * 1.0;
       for (int i = 0; i < DOF_SAMPLES; i++)
       {
          p = vec2((gl_FragCoord.x + cos(ang)*r) / resolution.x, (gl_FragCoord.y + sin(ang)*r) / resolution.y);
@@ -368,9 +368,11 @@ var config = {
    }
 };
 
+var pause = false;
+var stats = new Stats();
+var aspect, gl;
 function init()
 {
-   var pause = false;
    document.addEventListener('keydown', function(e) {
       switch (e.keyCode)
       {
@@ -421,15 +423,14 @@ function init()
    panel.add(config.knot, "rotations").min(1).max(10).step(1);
    if (!mobile) panel.open();
    
-   var stats = new Stats();
    document.body.appendChild(stats.domElement);
    
    // create webgl context on the canvas element
-   var canvas = document.getElementById("canvas"),
-       aspect = canvas.width / canvas.height;
+   var canvas = document.getElementById("canvas");
+   aspect = canvas.width / canvas.height;
    try
    {
-      var gl = canvas.getContext("experimental-webgl");
+      gl = canvas.getContext("experimental-webgl");
    }
    catch (e)
    {
@@ -584,8 +585,14 @@ function init()
    })();
 }
       </script>
+      <script src="scripts/utils.js"></script>
+      <link rel="stylesheet" href="../../reset.css">
+      <link rel="stylesheet" href="./page.css">
+      <link href='http://fonts.googleapis.com/css?family=Open+Sans:400,300,600' rel='stylesheet' type='text/css'>
    </head>
    <body onload="init()">
-      <canvas id="canvas" width="768" height="512">
+      <canvas id="canvas" width="768" height="512"></canvas>
+      <a href="#" id="fullscreen">Toggle Full Screen</a>
+      <a href="." id="back">Show me more awesome demos!</a>
    </body>
 </html>
